@@ -1,0 +1,3 @@
+- remove result.png referencs from client
+- test with InTCPtor
+- refine UI backgrounds/messages
