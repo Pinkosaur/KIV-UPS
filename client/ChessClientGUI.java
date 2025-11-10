@@ -6,8 +6,6 @@ import java.awt.event.ComponentEvent;
 import java.awt.event.MouseAdapter;
 import java.awt.event.MouseEvent;
 import java.awt.image.BufferedImage;
-import java.io.File;
-import java.io.IOException;
 import java.io.*;
 import java.net.*;
 import java.util.HashMap;
@@ -57,6 +55,14 @@ public class ChessClientGUI {
 
     private boolean kingInCheck = false;
     private int kingR = -1, kingC = -1;
+
+    // last-move markers (model coordinates). null = none
+    private Point lastFrom = null;
+    private Point lastTo = null;
+
+    // UI buttons (so we can enable/disable at game end)
+    private JButton resignBtn;
+    private JButton drawBtn;
 
     private volatile boolean gameEnded = false;
     private volatile boolean intentionalDisconnect = false;
@@ -178,11 +184,19 @@ public class ChessClientGUI {
                     squares[uiR][uiC].setIcon(icon);
                     squares[uiR][uiC].setText((icon == null) ? (p=='.'?"":""+p) : "");
 
-                    /* selection/highlight logic operates on model coords stored in highlighted set */
-                    if (highlighted.contains(new Point(modelR, modelC))) {
-                        squares[uiR][uiC].setBorder(BorderFactory.createLineBorder(Color.GREEN, 3));
-                    } else if (selR == modelR && selC == modelC) {
+                    // last-move highlight (yellow) — shown with precedence over normal borders,
+                    // but selection (red) takes visual precedence if same square is selected.
+                    boolean isLastFrom = (lastFrom != null && lastFrom.x == modelR && lastFrom.y == modelC);
+                    boolean isLastTo   = (lastTo   != null && lastTo.x   == modelR && lastTo.y   == modelC);
+
+                    if (selR == modelR && selC == modelC) {
+                        // selected square (highest visual priority)
                         squares[uiR][uiC].setBorder(BorderFactory.createLineBorder(Color.RED, 3));
+                    } else if (highlighted.contains(new Point(modelR, modelC))) {
+                        squares[uiR][uiC].setBorder(BorderFactory.createLineBorder(Color.GREEN, 3));
+                    } else if (isLastFrom || isLastTo) {
+                        // last move squares highlighted in yellow
+                        squares[uiR][uiC].setBorder(BorderFactory.createLineBorder(Color.YELLOW, 3));
                     } else {
                         squares[uiR][uiC].setBorder(BorderFactory.createLineBorder(Color.BLACK, 1));
                     }
@@ -413,10 +427,56 @@ public class ChessClientGUI {
         statusLabel = new JLabel("Not connected");
         JPanel topRight = new JPanel(new BorderLayout()); topRight.add(statusLabel, BorderLayout.NORTH);
         topRight.add(new JScrollPane(log), BorderLayout.CENTER);
-        JPanel bottom = new JPanel(new BorderLayout()); input = new JTextField(); sendBtn = new JButton("Send"); bottom.add(input, BorderLayout.CENTER); bottom.add(sendBtn, BorderLayout.EAST);
+        
+        JPanel bottom = new JPanel(new BorderLayout());
+        input = new JTextField();
+        sendBtn = new JButton("Send");
+        bottom.add(input, BorderLayout.CENTER);
+        bottom.add(sendBtn, BorderLayout.EAST);
+
+        // Extra controls: Resign and Draw Offer
+        JPanel ctrl = new JPanel(new FlowLayout(FlowLayout.CENTER, 8, 0));
+        resignBtn = new JButton("Resign");
+        drawBtn = new JButton("Offer Draw");
+        resignBtn.setEnabled(false);
+        drawBtn.setEnabled(false);
+        ctrl.add(drawBtn);
+        ctrl.add(resignBtn);
+
+        // action listeners for resign/draw
+        resignBtn.addActionListener(e -> {
+            int ok = JOptionPane.showConfirmDialog(frame, "Are you sure you want to resign?", "Resign", JOptionPane.YES_NO_OPTION);
+            if (ok == JOptionPane.YES_OPTION && out != null) {
+                out.println("RESIGN");
+                append(">> RESIGN");
+                // disable controls until server replies
+                resignBtn.setEnabled(false);
+                drawBtn.setEnabled(false);
+            }
+        });
+
+        drawBtn.addActionListener(e -> {
+            if (out != null) {
+                out.println("DRAW_OFFER");
+                append(">> DRAW_OFFER");
+                // disable the draw button until opponent responds (avoid spamming)
+                drawBtn.setEnabled(false);
+            }
+        });
+
+        // place controls under the input
+        JPanel bottomWrap = new JPanel(new BorderLayout());
+        bottomWrap.add(bottom, BorderLayout.NORTH);
+        bottomWrap.add(ctrl, BorderLayout.SOUTH);
+
+        // use bottomWrap instead of bottom when adding to 'right'
+        cards = new JPanel(new CardLayout());
         sendBtn.addActionListener(e -> sendInput()); input.addActionListener(e -> sendInput());
-        right.add(topRight, BorderLayout.CENTER); right.add(bottom, BorderLayout.SOUTH);
-        gameCard.add(boardPanel, BorderLayout.CENTER); gameCard.add(right, BorderLayout.EAST);
+        right.add(topRight, BorderLayout.CENTER);
+        right.add(bottomWrap, BorderLayout.SOUTH);
+        gameCard.add(bottomWrap, BorderLayout.SOUTH);
+        gameCard.add(boardPanel, BorderLayout.CENTER); 
+        gameCard.add(right, BorderLayout.EAST);
 
         // --- RESULT card (kept but not required) ---
         JPanel result = new JPanel(new BorderLayout());
@@ -544,9 +604,13 @@ public class ChessClientGUI {
         selR = selC = -1; 
         highlighted.clear(); 
         pendingFrom = pendingTo = null; 
+        lastFrom = lastTo = null;
         waitingForOk = false;
         endOverlayShown = false;
         gameEnded = false;  // Reset for next game
+        if (resignBtn != null) resignBtn.setEnabled(false);
+        if (drawBtn != null) drawBtn.setEnabled(false);
+
         
         initBoardModel(); 
         updateBoardUI();
@@ -659,6 +723,10 @@ public class ChessClientGUI {
         int r2 = 8 - (to.charAt(1) - '0');
         int c2 = to.charAt(0) - 'a';
 
+        // record last move (model coords)
+        lastFrom = new Point(r1, c1);
+        lastTo = new Point(r2, c2);
+
         char piece = board[r1][c1];
         board[r1][c1] = '.';
 
@@ -730,6 +798,10 @@ public class ChessClientGUI {
         int c1 = from.charAt(0) - 'a';
         int r2 = 8 - (to.charAt(1) - '0');
         int c2 = to.charAt(0) - 'a';
+
+        // record last move (model coords)
+        lastFrom = new Point(r1, c1);
+        lastTo = new Point(r2, c2);
 
         char piece = board[r1][c1];
         board[r1][c1] = '.';
@@ -830,6 +902,10 @@ public class ChessClientGUI {
                 updateBoardUI();
                 CardLayout cl = (CardLayout) cards.getLayout();
                 cl.show(cards, CARD_GAME);
+                // enable resign/draw now that game is active
+                if (resignBtn != null) resignBtn.setEnabled(true);
+                if (drawBtn != null) drawBtn.setEnabled(true);
+
             });
             return;
         }
@@ -910,6 +986,34 @@ public class ChessClientGUI {
             return;
         }
 
+                // handle incoming draw offer
+        if (msg.startsWith("DRAW_OFFER")) {
+            // show accept/decline dialog on EDT
+            SwingUtilities.invokeLater(() -> {
+                int choice = JOptionPane.showConfirmDialog(frame,
+                        "Opponent offers a draw. Accept?",
+                        "Draw offer",
+                        JOptionPane.YES_NO_OPTION);
+                if (choice == JOptionPane.YES_OPTION) {
+                    if (out != null) {
+                        out.println("DRAW_ACCEPT");
+                        append(">> DRAW_ACCEPT");
+                    }
+                } else {
+                    append("You declined the draw offer.");
+                    // no protocol decline message defined; just ignore
+                }
+            });
+            return;
+        }
+
+        if (msg.startsWith("DRAW_ACCEPTED")) {
+            append("Draw accepted");
+            showNeutralOverlay("Draw agreed");
+            return;
+        }
+
+
         // fallback: just log unknown messages
         append("Unhandled server msg: " + msg);
     }
@@ -918,6 +1022,12 @@ public class ChessClientGUI {
         SwingUtilities.invokeLater(() -> {
             endOverlayShown = true;
             gameEnded = true;
+
+            // disable controls
+            if (resignBtn != null) resignBtn.setEnabled(false);
+            if (drawBtn != null) drawBtn.setEnabled(false);
+
+
             if (isWinner) {
                 overlayColorPanel.setBackground(new Color(0, 64, 192, 140));
                 overlayTitle.setText("VICTORY");
@@ -942,6 +1052,11 @@ public class ChessClientGUI {
             if (endOverlayShown) return;
             endOverlayShown = true;
             gameEnded = true;
+
+            // disable controls
+            if (resignBtn != null) resignBtn.setEnabled(false);
+            if (drawBtn != null) drawBtn.setEnabled(false);
+
             overlayColorPanel.setBackground(new Color(48, 48, 48, 160));
             overlayTitle.setText(text);
             
