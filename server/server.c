@@ -16,6 +16,7 @@
  *   RESIGN
  *   DRAW_OFFER
  *   DRAW_ACCEPT
+ *   DRAW_DECLINE
  *   QUIT
  *
  * - Server -> Client:
@@ -27,6 +28,7 @@
  *   OPPONENT_RESIGNED
  *   DRAW_OFFER
  *   DRAW_ACCEPTED
+ *   DRAW_DECLINED
  *   BYE
  *
  */
@@ -91,6 +93,8 @@ struct Match {
        the square that can be captured by en-passant). -1 when none. */
     int ep_r;
     int ep_c;
+
+    int draw_offered_by; /* -1 = none, 0 = white offered, 1 = black offered */
 };
 
 static void init_board(GameState *g) {
@@ -601,6 +605,7 @@ static Match *match_create(Client *white, Client *black) {
     m->moves_count = 0;
     m->moves_cap = 0;
     m->finished = 0;   /* init finished flag */
+    m->draw_offered_by = -1;
 
     /* initial castling rights: both sides full rights */
     m->w_can_kingside = 1;
@@ -885,20 +890,53 @@ static void *client_worker(void *arg) {
                     }
                 } else if (strncmp(linebuf, "DRAW_OFFER", 10) == 0) {
                     Client *opp = (me == myMatch->white) ? myMatch->black : myMatch->white;
-                    if (opp && opp->sock > 0) {
+                    pthread_mutex_lock(&myMatch->lock);
+                    if (myMatch->draw_offered_by != -1) {
+                        /* there is already a pending draw offer (reject) */
+                        pthread_mutex_unlock(&myMatch->lock);
+                        send_error(me, "Draw offer already pending");
+                    } else if (opp && opp->sock > 0) {
+                        /* record who offered and forward offer */
+                        myMatch->draw_offered_by = me->color;
+                        pthread_mutex_unlock(&myMatch->lock);
                         send_line(opp->sock, "DRAW_OFFER");
                         send_line(me->sock, "OK"); /* ack local */
-                    } else send_error(me, "No opponent");
+                    } else {
+                        pthread_mutex_unlock(&myMatch->lock);
+                        send_error(me, "No opponent");
+                    }
                 } else if (strncmp(linebuf, "DRAW_ACCEPT", 11) == 0) {
                     Client *opp = (me == myMatch->white) ? myMatch->black : myMatch->white;
-                    if (opp && opp->sock > 0) {
-                        send_line(opp->sock, "DRAW_ACCEPTED");
-                        send_line(me->sock, "DRAW_ACCEPTED");
-                        pthread_mutex_lock(&myMatch->lock);
+                    pthread_mutex_lock(&myMatch->lock);
+                    /* only accept a draw if opponent actually offered it */
+                    if (myMatch->draw_offered_by == -1 || myMatch->draw_offered_by == me->color) {
+                        pthread_mutex_unlock(&myMatch->lock);
+                        send_error(me, "No draw offer to accept");
+                    } else {
+                        /* accept: clear pending offer, mark finished, notify both */
+                        myMatch->draw_offered_by = -1;
                         myMatch->finished = 1;
                         pthread_mutex_unlock(&myMatch->lock);
+                        if (opp && opp->sock > 0) send_line(opp->sock, "DRAW_ACCEPTED");
+                        send_line(me->sock, "DRAW_ACCEPTED");
                         goto cleanup;
-                    } else send_error(me, "No opponent");
+                    }
+                } else if (strncmp(linebuf, "DRAW_DECLINE", 11) == 0) {
+                    Client *opp = (me == myMatch->white) ? myMatch->black : myMatch->white;
+                    pthread_mutex_lock(&myMatch->lock);
+                    /* decline only allowed if opponent offered */
+                    if (myMatch->draw_offered_by == -1 || myMatch->draw_offered_by == me->color) {
+                        pthread_mutex_unlock(&myMatch->lock);
+                        send_error(me, "No draw offer to decline");
+                    } else {
+                        /* inform original offerer that their offer was declined */
+                        myMatch->draw_offered_by = -1;
+                        pthread_mutex_unlock(&myMatch->lock);
+                        if (opp && opp->sock > 0) {
+                            send_line(opp->sock, "DRAW_DECLINED");
+                        }
+                        send_line(me->sock, "OK");
+                    }              
                 } else if (strncmp(linebuf, "QUIT", 4) == 0) {
                     /* Treat explicit QUIT as opponent leaving -> opponent wins */
                     pthread_mutex_lock(&myMatch->lock);

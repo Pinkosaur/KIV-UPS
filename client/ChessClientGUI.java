@@ -65,6 +65,8 @@ public class ChessClientGUI {
 
     private volatile boolean gameEnded = false;
     private volatile boolean intentionalDisconnect = false;
+    private volatile boolean drawOfferPending = false;
+
     
     /* en-passant target (model coordinates) - square a capturing pawn would move to */
         private int epR = -1, epC = -1;
@@ -989,8 +991,10 @@ public class ChessClientGUI {
             return;
         }
 
-                // handle incoming draw offer
         if (msg.startsWith("DRAW_OFFER")) {
+            // record that we have a pending offer
+            drawOfferPending = true;
+
             // show accept/decline dialog on EDT
             SwingUtilities.invokeLater(() -> {
                 int choice = JOptionPane.showConfirmDialog(frame,
@@ -1002,20 +1006,39 @@ public class ChessClientGUI {
                         out.println("DRAW_ACCEPT");
                         append(">> DRAW_ACCEPT");
                     }
+                    drawOfferPending = false;
                 } else {
-                    append("You declined the draw offer.");
-                    // no protocol decline message defined; just ignore
+                    if (out != null) {
+                        out.println("DRAW_DECLINE");
+                        append(">> DRAW_DECLINE");
+                    } else {
+                        append("You declined the draw offer.");
+                    }
+                    drawOfferPending = false;
                 }
             });
             return;
         }
 
         if (msg.startsWith("DRAW_ACCEPTED")) {
-            append("Draw accepted");
-            showNeutralOverlay("Draw agreed");
+            drawOfferPending = false;
+            // handle draw finish: show neutral overlay / end state
+            showNeutralOverlay("DRAW");
             return;
         }
 
+        if (msg.startsWith("DRAW_DECLINED")) {
+            drawOfferPending = false;
+            SwingUtilities.invokeLater(() -> {
+                append("Draw offer was declined by opponent.");
+                JOptionPane.showMessageDialog(frame, "Your draw offer was declined.", "Draw declined", JOptionPane.INFORMATION_MESSAGE);
+                // re-enable draw button if you disable it when offering
+                if (drawBtn != null && !gameEnded) drawBtn.setEnabled(true);
+            });
+            return;
+        }
+
+        if (msg.startsWith("OK")) return;
 
         // fallback: just log unknown messages
         append("Unhandled server msg: " + msg);
@@ -1138,6 +1161,23 @@ public class ChessClientGUI {
         }
     }
 
-    private void sendInput() { String txt = input.getText().trim(); if (txt.isEmpty() || out==null) return; out.println(txt); append(">> " + txt); input.setText(""); }
+    private void sendInput() {
+        String txt = input.getText().trim();
+        if (txt.isEmpty() || out == null) return;
 
+        String upper = txt.trim().toUpperCase();
+        if (upper.equals("DRAW_ACCEPT") || upper.equals("DRAW_DECLINE")) {
+            if (!drawOfferPending) {
+                // refuse to send accept/decline with no pending offer
+                append("Cannot send " + txt + ": no draw offer pending.");
+                input.setText("");
+                return;
+            }
+            // allowed: fall through to send
+        }
+
+        out.println(txt);
+        append(">> " + txt);
+        input.setText("");
+    }
 }
