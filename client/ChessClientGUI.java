@@ -31,11 +31,10 @@ public class ChessClientGUI {
     private PrintWriter out;
     private Thread readerThread;
 
-    private JPanel cards; // CardLayout for welcome/waiting/game/result
+    private JPanel cards; // CardLayout for welcome/waiting/game
     private static final String CARD_WELCOME = "welcome";
     private static final String CARD_WAITING = "waiting";
     private static final String CARD_GAME = "game";
-    private static final String CARD_RESULT = "result";
 
     private JPanel boardPanel;
     private SquareLabel[][] squares = new SquareLabel[8][8];
@@ -74,9 +73,8 @@ public class ChessClientGUI {
     private JPanel overlayPanel;         // covers the window with transparent color
     private JPanel overlayColorPanel;    // colored semi-transparent panel inside overlay
     private JLabel overlayTitle;
+    private JLabel overlaySubtitle;
     private JButton overlayContinue;
-
-    private JLabel resultLabel; // (kept for compatibility)
 
     public static void main(String[] args) {
         SwingUtilities.invokeLater(() -> {
@@ -469,7 +467,6 @@ public class ChessClientGUI {
         bottomWrap.add(bottom, BorderLayout.NORTH);
         bottomWrap.add(ctrl, BorderLayout.SOUTH);
 
-        // use bottomWrap instead of bottom when adding to 'right'
         cards = new JPanel(new CardLayout());
         sendBtn.addActionListener(e -> sendInput()); input.addActionListener(e -> sendInput());
         right.add(topRight, BorderLayout.CENTER);
@@ -478,20 +475,9 @@ public class ChessClientGUI {
         gameCard.add(boardPanel, BorderLayout.CENTER); 
         gameCard.add(right, BorderLayout.EAST);
 
-        // --- RESULT card (kept but not required) ---
-        JPanel result = new JPanel(new BorderLayout());
-        JLabel resultBg = loadBackgroundLabel(BACK_DIR + "/result.png", new Color(20,20,20));
-        result.add(resultBg, BorderLayout.CENTER);
-        resultLabel = new JLabel("", SwingConstants.CENTER); resultLabel.setForeground(Color.WHITE); resultLabel.setFont(resultLabel.getFont().deriveFont(18f));
-        JButton exitBtn = new JButton("Exit to menu");
-        JPanel rp = new JPanel(); rp.add(exitBtn); rp.add(resultLabel);
-        result.add(rp, BorderLayout.SOUTH);
-        exitBtn.addActionListener(e -> exitToWelcome());
-
         cards.add(welcome, CARD_WELCOME);
         cards.add(waiting, CARD_WAITING);
         cards.add(gameCard, CARD_GAME);
-        cards.add(result, CARD_RESULT);
 
         frame.getContentPane().add(cards, BorderLayout.CENTER);
 
@@ -520,11 +506,20 @@ public class ChessClientGUI {
         inner.setLayout(new BoxLayout(inner, BoxLayout.Y_AXIS));
         overlayTitle.setAlignmentX(Component.CENTER_ALIGNMENT);
         overlayContinue.setAlignmentX(Component.CENTER_ALIGNMENT);
+
+        overlaySubtitle = new JLabel("", SwingConstants.CENTER);
+        overlaySubtitle.setForeground(Color.WHITE);
+        overlaySubtitle.setFont(overlaySubtitle.getFont().deriveFont(18f));
+        overlaySubtitle.setAlignmentX(Component.CENTER_ALIGNMENT);
+
         inner.add(Box.createVerticalGlue());
         inner.add(overlayTitle);
+        inner.add(Box.createRigidArea(new Dimension(0,8)));
+        inner.add(overlaySubtitle);
         inner.add(Box.createRigidArea(new Dimension(0,20)));
         inner.add(overlayContinue);
         inner.add(Box.createVerticalGlue());
+
 
         overlayColorPanel.add(inner, new GridBagConstraints());
         overlayPanel.add(overlayColorPanel);
@@ -617,6 +612,8 @@ public class ChessClientGUI {
         
         // Hide overlay and switch card
         SwingUtilities.invokeLater(() -> {
+            overlayTitle.setText("");
+            overlaySubtitle.setText("");
             overlayPanel.setVisible(false);
             CardLayout cl = (CardLayout) cards.getLayout(); 
             cl.show(cards, CARD_WELCOME);
@@ -947,13 +944,13 @@ public class ChessClientGUI {
 
         if (msg.startsWith("CHECKMATE_WIN")) {
             append("You won by checkmate");
-            showEndOverlay(true);
+            showEndOverlay(true, "Checkmate");
             return;
         }
 
         if (msg.startsWith("CHECKMATE")) {
             append("Checkmate — you lost");
-            showEndOverlay(false);
+            showEndOverlay(false, "Checkmate");
             return;
         }
 
@@ -964,13 +961,19 @@ public class ChessClientGUI {
 
         if (msg.startsWith("OPPONENT_RESIGNED")) {
             append("Opponent resigned");
-            showEndOverlay(true);
+            showEndOverlay(true, "Opponent resigned");
+            return;
+        }
+
+        if (msg.startsWith("OPPONENT_QUIT")) {
+            append("Opponent disconnected");
+            showEndOverlay(true, "Opponent quit the game");
             return;
         }
 
         if (msg.startsWith("RESIGN")) {
             append("You resigned");
-            showEndOverlay(false);
+            showEndOverlay(false, "You resigned");
             return;
         }
 
@@ -1018,7 +1021,7 @@ public class ChessClientGUI {
         append("Unhandled server msg: " + msg);
     }
 
-    private void showEndOverlay(boolean isWinner) {
+    private void showEndOverlay(boolean isWinner, String subtitle) {
         SwingUtilities.invokeLater(() -> {
             endOverlayShown = true;
             gameEnded = true;
@@ -1035,6 +1038,8 @@ public class ChessClientGUI {
                 overlayColorPanel.setBackground(new Color(192, 32, 32, 160));
                 overlayTitle.setText("DEFEAT");
             }
+
+            overlaySubtitle.setText(subtitle != null ? subtitle : "");
             
             // Ensure bounds are set before making visible
             Rectangle b = frame.getContentPane().getBounds();
@@ -1059,6 +1064,7 @@ public class ChessClientGUI {
 
             overlayColorPanel.setBackground(new Color(48, 48, 48, 160));
             overlayTitle.setText(text);
+            overlaySubtitle.setText("");
             
             // Ensure bounds are set before making visible
             Rectangle b = frame.getContentPane().getBounds();

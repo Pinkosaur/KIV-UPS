@@ -877,11 +877,11 @@ static void *client_worker(void *arg) {
                     Client *opp = (me == myMatch->white) ? myMatch->black : myMatch->white;
                     
                     /* Send CHECKMATE to resigning player (they lost) */
-                    send_line(me->sock, "CHECKMATE");
+                    send_line(me->sock, "RESIGN");
                     
                     /* Send CHECKMATE_WIN to opponent (they won) */
                     if (opp && opp->sock > 0) {
-                        send_line(opp->sock, "CHECKMATE_WIN");
+                        send_line(opp->sock, "OPPONENT_RESIGNED");
                     }
                 } else if (strncmp(linebuf, "DRAW_OFFER", 10) == 0) {
                     Client *opp = (me == myMatch->white) ? myMatch->black : myMatch->white;
@@ -894,13 +894,27 @@ static void *client_worker(void *arg) {
                     if (opp && opp->sock > 0) {
                         send_line(opp->sock, "DRAW_ACCEPTED");
                         send_line(me->sock, "DRAW_ACCEPTED");
+                        pthread_mutex_lock(&myMatch->lock);
+                        myMatch->finished = 1;
+                        pthread_mutex_unlock(&myMatch->lock);
                         goto cleanup;
                     } else send_error(me, "No opponent");
                 } else if (strncmp(linebuf, "QUIT", 4) == 0) {
-                    match_close_and_notify(myMatch, me, "BYE");
+                    /* Treat explicit QUIT as opponent leaving -> opponent wins */
+                    pthread_mutex_lock(&myMatch->lock);
+                    myMatch->finished = 1;
+                    pthread_mutex_unlock(&myMatch->lock);
+
+                    Client *opp = (me == myMatch->white) ? myMatch->black : myMatch->white;
+                    if (opp && opp->sock > 0) {
+                        /* Notify opponent that their opponent quit and that they won */
+                        send_line(opp->sock, "OPPONENT_QUIT");
+                    }
+                    /* send BYE to quitting client and cleanup their thread */
                     send_line(me->sock, "BYE");
                     goto cleanup;
                 } else {
+
                     send_error(me, "Unknown command");
                 }
 
@@ -926,9 +940,18 @@ cleanup:
 
         /* protect match while we touch it */
         pthread_mutex_lock(&m->lock);
+
+        /* If match not already finished, mark it finished and notify opponent */
+        if (!m->finished) {
+            m->finished = 1;
+            if (other && other->sock > 0) {
+                /* Notify opponent that the other side disconnected and that they won */
+                send_line(other->sock, "OPPONENT_QUIT");
+            }
+        }
+
+        /* Clear opponent's match pointer so their thread won't reuse this match pointer */
         if (other && other->sock > 0) {
-            /* Do not send BYE or close opponent socket here.
-               Just clear their match pointer so they won't reference this Match after it may be freed. */
             other->match = NULL;
         }
         pthread_mutex_unlock(&m->lock);
@@ -941,6 +964,7 @@ cleanup:
                The opponent thread will free it when it exits/receives QUIT. */
         }
     }
+
 
 
     free(me);
