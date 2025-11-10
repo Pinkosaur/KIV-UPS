@@ -1,3 +1,7 @@
 - remove result.png referencs from client
 - test with InTCPtor
 - refine UI backgrounds/messages
+- message after draw refusal
+- handle player quitting the game (window closed)
+- timeout + retry for player not found
+- additional message on victory/defeat (checkmate/resign/quit?)
