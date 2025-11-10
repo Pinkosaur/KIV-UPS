@@ -1,7 +1,7 @@
-- remove result.png referencs from client
+- connect through lan
 - test with InTCPtor
 - refine UI backgrounds/messages
 - message after draw refusal
-- handle player quitting the game (window closed)
 - timeout + retry for player not found
-- additional message on victory/defeat (checkmate/resign/quit?)
+- timeout for inactivity -> player loses, end message mentions timeout
+- client/server ping + disconnection timeout if failed?
