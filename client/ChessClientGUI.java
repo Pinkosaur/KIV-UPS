@@ -21,6 +21,9 @@ public class ChessClientGUI {
     private static final String PIECES_DIR = "client/pieces"; // relative to working dir
     private static final String BACK_DIR = "client/backgrounds"; // placeholders
     private static final int SQUARE_SIZE = 64;
+    private String clientName = "JavaClient";
+    private JTextField nameField;
+
 
     private JFrame frame;
     private JTextArea log;
@@ -71,7 +74,7 @@ public class ChessClientGUI {
 
     
     /* en-passant target (model coordinates) - square a capturing pawn would move to */
-        private int epR = -1, epC = -1;
+    private int epR = -1, epC = -1;
 
     // result UI (overlay)
     private JPanel overlayPanel;         // covers the window with transparent color
@@ -402,17 +405,30 @@ public class ChessClientGUI {
         JPanel wc = new JPanel();
         wc.setOpaque(false);
         wc.setLayout(new BoxLayout(wc, BoxLayout.Y_AXIS));
+
+        // name row
+        JPanel nameRow = new JPanel(new FlowLayout(FlowLayout.CENTER, 8, 6));
+        nameRow.setOpaque(false);
+        nameRow.add(new JLabel("Your name:"));
+        nameField = new JTextField(clientName, 16);
+        nameRow.add(nameField);
+        wc.add(nameRow);
+
+        // server IP row
         JPanel ipRow = new JPanel(new FlowLayout(FlowLayout.CENTER, 8, 6));
         ipRow.setOpaque(false);
         ipRow.add(new JLabel("Server IP:"));
         serverIpField = new JTextField(serverHost, 18);
         ipRow.add(serverIpField);
         wc.add(ipRow);
+
         JButton findBtn = new JButton("Find Match");
         findBtn.setAlignmentX(Component.CENTER_ALIGNMENT);
         wc.add(findBtn);
+
         welcome.add(wc, BorderLayout.SOUTH);
         findBtn.addActionListener(e -> onFindMatchClicked());
+
 
         // --- WAITING card ---
         JPanel waiting = new JPanel(new BorderLayout());
@@ -580,6 +596,10 @@ public class ChessClientGUI {
         if (serverIpField != null) {
             String entered = serverIpField.getText().trim();
             if (!entered.isEmpty()) serverHost = entered;
+        }
+                if (nameField != null) {
+            String n = nameField.getText().trim();
+            if (!n.isEmpty()) clientName = n;
         }
 
         // switch to waiting card and start connection/thread
@@ -1136,7 +1156,9 @@ public class ChessClientGUI {
             out = new PrintWriter(new OutputStreamWriter(socket.getOutputStream(), "UTF-8"), true);
 
             append("Connected");
-            out.println("HELLO JavaClient");
+            out.println("HELLO " + clientName);
+            append("Sent HELLO " + clientName);
+
 
             String line;
             while ((line = in.readLine()) != null) {

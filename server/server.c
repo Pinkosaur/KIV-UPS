@@ -41,6 +41,11 @@
 #include <netinet/in.h>
 #include <errno.h>
 #include <ctype.h>
+#include <ifaddrs.h>
+#include <net/if.h>      /* IF_NAMESIZE */
+#include <sys/socket.h>  /* for getsockname */
+#include <netdb.h>       /* getnameinfo if needed */
+
 
 #define LISTEN_ADDR "127.0.0.1"
 #define PORT 10001
@@ -69,7 +74,13 @@ typedef struct Client {
     int color; /* 0 = WHITE, 1 = BLACK, -1 = unassigned */
     int paired; /* 0 not paired, 1 paired */
     Match *match;
+
+    /* verbose connection info for logging */
+    char client_addr[64];     /* "192.168.1.5:52344" */
+    char server_ifname[IF_NAMESIZE]; /* local interface name e.g. "eth0" */
+    char server_ip[INET_ADDRSTRLEN]; /* local address used to accept */
 } Client;
+
 
 struct Match {
     Client *white;
@@ -631,6 +642,54 @@ static void match_free(Match *m) {
     free(m);
 }
 
+/* Print all IPv4 interfaces and addresses on startup */
+static void list_local_interfaces(void) {
+    struct ifaddrs *ifaddr, *ifa;
+    char addrbuf[INET_ADDRSTRLEN];
+
+    if (getifaddrs(&ifaddr) == -1) {
+        perror("getifaddrs");
+        return;
+    }
+
+    printf("Local network interfaces (IPv4):\n");
+    for (ifa = ifaddr; ifa != NULL; ifa = ifa->ifa_next) {
+        if (!ifa->ifa_addr) continue;
+        if (ifa->ifa_addr->sa_family == AF_INET) {
+            struct sockaddr_in *sa = (struct sockaddr_in *)ifa->ifa_addr;
+            if (inet_ntop(AF_INET, &sa->sin_addr, addrbuf, sizeof(addrbuf))) {
+                printf("  %s: %s\n", ifa->ifa_name, addrbuf);
+            }
+        }
+    }
+    freeifaddrs(ifaddr);
+}
+
+/* Given IPv4 address (in_addr), find interface name that has this address (returns 1 on success) */
+static int get_interface_name_for_addr(struct in_addr inaddr, char *ifname_out, size_t ifname_out_sz) {
+    struct ifaddrs *ifaddr, *ifa;
+    char addrbuf[INET_ADDRSTRLEN];
+    int found = 0;
+
+    if (getifaddrs(&ifaddr) == -1) return 0;
+
+    for (ifa = ifaddr; ifa != NULL; ifa = ifa->ifa_next) {
+        if (!ifa->ifa_addr) continue;
+        if (ifa->ifa_addr->sa_family != AF_INET) continue;
+        struct sockaddr_in *sa = (struct sockaddr_in *)ifa->ifa_addr;
+        if (sa->sin_addr.s_addr == inaddr.s_addr) {
+            strncpy(ifname_out, ifa->ifa_name, ifname_out_sz-1);
+            ifname_out[ifname_out_sz-1] = '\0';
+            found = 1;
+            break;
+        }
+    }
+
+    freeifaddrs(ifaddr);
+    return found;
+}
+
+
 /* append move string to match history (caller should lock) */
 static int match_append_move(Match *m, const char *mv) {
     if (!m || !mv) return -1;
@@ -711,7 +770,12 @@ static void *client_worker(void *arg) {
         }
     }
 
-    printf("Client connected: %s (sock %d)\n", me->name, me->sock);
+    printf("Client connected: %s (peer %s) accepted on %s %s (sock %d)\n",
+           me->name,
+           me->client_addr,
+           me->server_ifname,
+           (me->server_ip[0] ? me->server_ip : ""),
+           me->sock);
 
     /* Try to pair */
     pthread_mutex_lock(&wait_mutex);
@@ -722,7 +786,7 @@ static void *client_worker(void *arg) {
         me->color = 0; /* will be WHITE */
         me->paired = 0;
         send_line(me->sock, "WAITING");
-        printf("%s is waiting for opponent\n", me->name);
+        printf("%s (peer %s) is waiting on %s %s\n", me->name, me->client_addr, me->server_ifname, me->server_ip);
 
         /* busy wait until paired (small sleep) */
         while (!me->paired) {
@@ -749,7 +813,8 @@ static void *client_worker(void *arg) {
 
         /* notify start */
         notify_start(m);
-        printf("Paired %s (white) <-> %s (black)\n", op->name, me->name);
+        printf("Paired %s (white, peer %s) <-> %s (black, peer %s)  [on %s/%s]\n",
+               op->name, op->client_addr, me->name, me->client_addr, op->server_ifname, op->server_ip);
     }
 
     /* At this point me->match should be set by pairing routine */
@@ -964,7 +1029,7 @@ static void *client_worker(void *arg) {
 cleanup:
     /* cleanup client: close socket, free, notify other and free match */
     close(me->sock);
-    printf("%s disconnected\n", me->name);
+    printf("%s disconnected (peer %s) on %s %s\n", me->name, me->client_addr, me->server_ifname, me->server_ip);
 
     /* if we were in waiting queue, remove */
     pthread_mutex_lock(&wait_mutex);
@@ -1025,6 +1090,7 @@ int main(void) {
     /* bind to all interfaces (0.0.0.0) so clients on the LAN can connect */
     addr.sin_addr.s_addr = htonl(INADDR_ANY);
 
+    list_local_interfaces();
 
     if (bind(srv, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
         perror("bind"); close(srv); return 1;
@@ -1043,12 +1109,45 @@ int main(void) {
             perror("accept");
             continue;
         }
+
         Client *c = calloc(1, sizeof(Client));
+        if (!c) {
+            close(csock);
+            continue;
+        }
+
         c->sock = csock;
         c->color = -1;
         c->paired = 0;
         c->match = NULL;
         c->name[0] = '\0';
+        c->client_addr[0] = '\0';
+        c->server_ifname[0] = '\0';
+        c->server_ip[0] = '\0';
+
+        /* record remote (client) address:port */
+        {
+            char addrbuf[INET_ADDRSTRLEN];
+            inet_ntop(AF_INET, &cliaddr.sin_addr, addrbuf, sizeof(addrbuf));
+            snprintf(c->client_addr, sizeof(c->client_addr), "%s:%u", addrbuf, ntohs(cliaddr.sin_port));
+        }
+
+        /* record which local interface/address the socket is bound to (use getsockname) */
+        {
+            struct sockaddr_in localaddr;
+            socklen_t llen = sizeof(localaddr);
+            if (getsockname(csock, (struct sockaddr *)&localaddr, &llen) == 0) {
+                inet_ntop(AF_INET, &localaddr.sin_addr, c->server_ip, sizeof(c->server_ip));
+                /* find interface name that owns this IP, if any */
+                if (!get_interface_name_for_addr(localaddr.sin_addr, c->server_ifname, sizeof(c->server_ifname))) {
+                    /* fallback to empty or "unknown" */
+                    strncpy(c->server_ifname, "unknown", sizeof(c->server_ifname)-1);
+                }
+            } else {
+                strncpy(c->server_ifname, "unknown", sizeof(c->server_ifname)-1);
+                c->server_ip[0] = '\0';
+            }
+        }
 
         pthread_t tid;
         if (pthread_create(&tid, NULL, client_worker, c) != 0) {
