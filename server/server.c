@@ -1022,7 +1022,9 @@ int main(void) {
     memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
     addr.sin_port = htons(PORT);
-    inet_pton(AF_INET, LISTEN_ADDR, &addr.sin_addr);
+    /* bind to all interfaces (0.0.0.0) so clients on the LAN can connect */
+    addr.sin_addr.s_addr = htonl(INADDR_ANY);
+
 
     if (bind(srv, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
         perror("bind"); close(srv); return 1;
@@ -1031,7 +1033,7 @@ int main(void) {
         perror("listen"); close(srv); return 1;
     }
 
-    printf("Server listening on %s:%d\n", LISTEN_ADDR, PORT);
+    printf("Server listening on all interfaces, port %d\n", PORT);
 
     while (1) {
         struct sockaddr_in cliaddr;

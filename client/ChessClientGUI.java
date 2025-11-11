@@ -14,8 +14,10 @@ import java.util.Map;
 import java.util.Set;
 
 public class ChessClientGUI {
-    private static final String HOST = "127.0.0.1";
+    // default host; will be overriden by the text field on the welcome screen
     private static final int PORT = 10001;
+    private String serverHost = "127.0.0.1";
+    private JTextField serverIpField; // welcome-screen input for server IP
     private static final String PIECES_DIR = "client/pieces"; // relative to working dir
     private static final String BACK_DIR = "client/backgrounds"; // placeholders
     private static final int SQUARE_SIZE = 64;
@@ -396,8 +398,19 @@ public class ChessClientGUI {
         JPanel welcome = new JPanel(new BorderLayout());
         JLabel welcomeBg = loadBackgroundLabel(BACK_DIR + "/welcome.png", new Color(30,30,60));
         welcome.add(welcomeBg, BorderLayout.CENTER);
+        // server IP input + find button panel
+        JPanel wc = new JPanel();
+        wc.setOpaque(false);
+        wc.setLayout(new BoxLayout(wc, BoxLayout.Y_AXIS));
+        JPanel ipRow = new JPanel(new FlowLayout(FlowLayout.CENTER, 8, 6));
+        ipRow.setOpaque(false);
+        ipRow.add(new JLabel("Server IP:"));
+        serverIpField = new JTextField(serverHost, 18);
+        ipRow.add(serverIpField);
+        wc.add(ipRow);
         JButton findBtn = new JButton("Find Match");
-        JPanel wc = new JPanel(); wc.setOpaque(false); wc.add(findBtn);
+        findBtn.setAlignmentX(Component.CENTER_ALIGNMENT);
+        wc.add(findBtn);
         welcome.add(wc, BorderLayout.SOUTH);
         findBtn.addActionListener(e -> onFindMatchClicked());
 
@@ -563,6 +576,12 @@ public class ChessClientGUI {
     }
 
     private void onFindMatchClicked() {
+        // read server host from text field (trim) and fallback to default
+        if (serverIpField != null) {
+            String entered = serverIpField.getText().trim();
+            if (!entered.isEmpty()) serverHost = entered;
+        }
+
         // switch to waiting card and start connection/thread
         CardLayout cl = (CardLayout) cards.getLayout(); cl.show(cards, CARD_WAITING);
         log = (log == null) ? new JTextArea() : log; // ensure exists
@@ -1111,8 +1130,8 @@ public class ChessClientGUI {
 
     private void connect() {
         try {
-            append("Connecting to server...");
-            socket = new Socket(HOST, PORT);
+            append("Connecting to server " + serverHost + ":" + PORT + " ...");
+            socket = new Socket(serverHost, PORT);
             in = new BufferedReader(new InputStreamReader(socket.getInputStream(), "UTF-8"));
             out = new PrintWriter(new OutputStreamWriter(socket.getOutputStream(), "UTF-8"), true);
 
