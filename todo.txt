@@ -1,7 +1,6 @@
-- connect through lan
 - test with InTCPtor
 - refine UI backgrounds/messages, remove "?" from popups
-- timeout + retry for player not found
-- timeout for inactivity -> player loses, end message mentions timeout
 - client/server ping + disconnection timeout if failed?
-- client names/identifiers for readable server logging
+- fragment code into separate files
+- squares stay square on resize
+- random client names
