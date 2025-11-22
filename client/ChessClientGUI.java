@@ -24,6 +24,10 @@ public class ChessClientGUI {
     private String clientName = "JavaClient";
     private JTextField nameField;
 
+    // waiting-for-match timeout (milliseconds)
+    //private static final int WAIT_MATCH_TIMEOUT_MS = 10_000;
+    //private javax.swing.Timer waitTimer;
+    private volatile boolean matchmakingTimeoutReceived = false;
 
     private JFrame frame;
     private JTextArea log;
@@ -53,9 +57,9 @@ public class ChessClientGUI {
     private volatile boolean endOverlayShown = false;
     private int selR = -1, selC = -1;
     private Set<Point> highlighted = new HashSet<>();
-    private String pendingFrom = null, pendingTo = null;
-    private char pendingPromo = 0;
-    private boolean waitingForOk = false;
+    private volatile String pendingFrom = null, pendingTo = null;
+    private volatile char pendingPromo = 0;
+    private volatile boolean waitingForOk = false;
 
     private boolean kingInCheck = false;
     private int kingR = -1, kingC = -1;
@@ -389,7 +393,7 @@ public class ChessClientGUI {
             @Override
             public void windowClosing(java.awt.event.WindowEvent e) {
                 // This runs on the EDT — close network resources cleanly
-                closeConnection();
+                sendQuitAndClose();
                 // allow normal disposal to continue
             }
         });
@@ -526,6 +530,11 @@ public class ChessClientGUI {
         overlayTitle.setForeground(Color.WHITE);
         overlayTitle.setFont(overlayTitle.getFont().deriveFont(48f).deriveFont(Font.BOLD));
 
+        // subtitle below the title (smaller)
+        overlaySubtitle = new JLabel("", SwingConstants.CENTER);
+        overlaySubtitle.setForeground(Color.WHITE);
+        overlaySubtitle.setFont(overlaySubtitle.getFont().deriveFont(18f));
+
         overlayContinue = new JButton("Continue");
         overlayContinue.setFocusPainted(false);
         overlayContinue.addActionListener(e -> {
@@ -536,13 +545,8 @@ public class ChessClientGUI {
         inner.setOpaque(false);
         inner.setLayout(new BoxLayout(inner, BoxLayout.Y_AXIS));
         overlayTitle.setAlignmentX(Component.CENTER_ALIGNMENT);
-        overlayContinue.setAlignmentX(Component.CENTER_ALIGNMENT);
-
-        overlaySubtitle = new JLabel("", SwingConstants.CENTER);
-        overlaySubtitle.setForeground(Color.WHITE);
-        overlaySubtitle.setFont(overlaySubtitle.getFont().deriveFont(18f));
         overlaySubtitle.setAlignmentX(Component.CENTER_ALIGNMENT);
-
+        overlayContinue.setAlignmentX(Component.CENTER_ALIGNMENT);
         inner.add(Box.createVerticalGlue());
         inner.add(overlayTitle);
         inner.add(Box.createRigidArea(new Dimension(0,8)));
@@ -550,6 +554,7 @@ public class ChessClientGUI {
         inner.add(Box.createRigidArea(new Dimension(0,20)));
         inner.add(overlayContinue);
         inner.add(Box.createVerticalGlue());
+
 
 
         overlayColorPanel.add(inner, new GridBagConstraints());
@@ -592,18 +597,18 @@ public class ChessClientGUI {
     }
 
     private void onFindMatchClicked() {
+        CardLayout cl = (CardLayout) cards.getLayout(); cl.show(cards, CARD_WAITING);
+
         // read server host from text field (trim) and fallback to default
         if (serverIpField != null) {
             String entered = serverIpField.getText().trim();
             if (!entered.isEmpty()) serverHost = entered;
         }
-                if (nameField != null) {
+        if (nameField != null) {
             String n = nameField.getText().trim();
             if (!n.isEmpty()) clientName = n;
         }
 
-        // switch to waiting card and start connection/thread
-        CardLayout cl = (CardLayout) cards.getLayout(); cl.show(cards, CARD_WAITING);
         log = (log == null) ? new JTextArea() : log; // ensure exists
         startConnection();
     }
@@ -611,6 +616,7 @@ public class ChessClientGUI {
     private void startConnection() {
         // close existing if any
         closeConnection();
+        matchmakingTimeoutReceived = false;
         intentionalDisconnect = false;
         readerThread = new Thread(this::connect, "ChessClient-Reader");
         readerThread.setDaemon(true); // don't keep JVM alive solely for this thread
@@ -618,22 +624,27 @@ public class ChessClientGUI {
     }
 
     private void closeConnection() {
-        intentionalDisconnect = true;
-        try { 
-            if (out != null && !gameEnded) { 
-                out.println("QUIT"); 
-                out.flush(); 
-            } 
-        } catch (Exception ignored) {}
-        
         try { if (socket != null) socket.close(); } catch (Exception ignored) {}
         socket = null; in = null; out = null;
         if (readerThread != null) { readerThread.interrupt(); readerThread = null; }
     }
 
+    private void sendQuitAndClose() {
+        intentionalDisconnect = true;
+        try {
+            if (out != null) {
+                out.println("QUIT");
+                out.flush();
+            }
+        } catch (Exception ignored) {}
+        closeConnection();
+    }
+
+
     private void exitToWelcome() {
         closeConnection();
-        
+        matchmakingTimeoutReceived = false;
+
         // Reset game state
         myColor = -1; 
         myTurn = false; 
@@ -916,6 +927,39 @@ public class ChessClientGUI {
             return;
         }
 
+        if (msg.startsWith("MATCHMAKING_TIMEOUT")) {
+            append("Matchmaking timed out (no opponent found).");
+            matchmakingTimeoutReceived = true;
+
+            // Wait a short moment to allow the server to close/cleanup its socket, then show popup
+            // Use a single-shot Swing Timer to run on EDT after a short delay (500 ms).
+            javax.swing.Timer t = new javax.swing.Timer(500, ev -> {
+                ((javax.swing.Timer)ev.getSource()).stop();
+                // this runs on EDT
+                int res = JOptionPane.showOptionDialog(frame,
+                        "No opponent found. Retry searching for a match or return to the menu.",
+                        "No opponent found",
+                        JOptionPane.DEFAULT_OPTION,
+                        JOptionPane.INFORMATION_MESSAGE,
+                        null,
+                        new String[] { "Retry", "Back to menu" },
+                        "Retry");
+                if (res == 0) { // Retry
+                    matchmakingTimeoutReceived = false;
+                    startConnection();
+                    CardLayout cl = (CardLayout) cards.getLayout();
+                    cl.show(cards, CARD_WAITING);
+                } else {
+                    matchmakingTimeoutReceived = false;
+                    exitToWelcome();
+                }
+            });
+            t.setRepeats(false);
+            t.start();
+
+            return;
+        }
+
         if (msg.startsWith("START")) {
             // do all UI updates on EDT to avoid race conditions / invisible card issues
             SwingUtilities.invokeLater(() -> {
@@ -1077,6 +1121,18 @@ public class ChessClientGUI {
             return;
         }
 
+        if (msg.startsWith("OPPONENT_TIMEOUT")) {
+            append("Opponent timed out");
+            showEndOverlay(true, "Opponent timed out");
+            return;
+        }
+
+        if (msg.startsWith("TIMEOUT")) {
+            append("You timed out");
+            showEndOverlay(false, "You timed out");
+            return;
+        }
+
         if (msg.startsWith("OK")) return;
 
         // fallback: just log unknown messages
@@ -1167,6 +1223,25 @@ public class ChessClientGUI {
 
             // readLine returned null => peer closed connection (EOF)
             append("Server closed connection (EOF).");
+
+            // If we previously received MATCH_TIMEOUT we already showed the popup.
+            if (matchmakingTimeoutReceived) {
+                // do nothing extra — the popup already handled menu/retry choices
+                append("Matchmaking EOF after MATCH_TIMEOUT; no further UI changes.");
+                matchmakingTimeoutReceived = false;
+            } else {
+                // If we already showed a game-end overlay (CHECKMATE etc), don't overwrite it.
+                if (myColor != -1) {
+                    if (!endOverlayShown) {
+                        showNeutralOverlay("Connection closed by server");
+                    }
+                } else {
+                    SwingUtilities.invokeLater(() -> {
+                        CardLayout cl = (CardLayout) cards.getLayout();
+                        cl.show(cards, CARD_WELCOME);
+                    });
+                }
+            }
 
             // If we already showed a game-end overlay (CHECKMATE etc), don't overwrite it.
             if (myColor != -1) {

@@ -7,7 +7,7 @@
  * Run:
  *   ./server
  *
- * Listens on 127.0.0.1:10001
+ * Listens on 0.0.0.0:10001
  *
  * Protocol (line-based UTF-8):
  * - Client -> Server:
@@ -25,10 +25,17 @@
  *   OK_MOVE
  *   ERROR <reason>
  *   OPPONENT_MOVE <move>
+ *   CHECK
+ *   CHECKMATE
+ *   CHECKMATE_WIN
+ *   RESIGN
  *   OPPONENT_RESIGNED
  *   DRAW_OFFER
  *   DRAW_ACCEPTED
  *   DRAW_DECLINED
+ *   TIMEOUT
+ *   OPPONENT_TIMEOUT
+ *   MATCH_TIMEOUT
  *   BYE
  *
  */
@@ -45,13 +52,14 @@
 #include <net/if.h>      /* IF_NAMESIZE */
 #include <sys/socket.h>  /* for getsockname */
 #include <netdb.h>       /* getnameinfo if needed */
+#include <time.h>
 
-
-#define LISTEN_ADDR "127.0.0.1"
 #define PORT 10001
 #define BACKLOG 10
 #define BUF_SZ 1024
 #define LINEBUF_SZ 4096
+#define TURN_TIMEOUT_SECONDS 120
+#define MATCHMAKING_TIMEOUT_SECONDS 10
 
 /* forward */
 typedef struct Match Match;
@@ -106,6 +114,8 @@ struct Match {
     int ep_c;
 
     int draw_offered_by; /* -1 = none, 0 = white offered, 1 = black offered */
+    time_t last_move_time; /* time when current turn started */
+    int turn_timeout_seconds;
 };
 
 static void init_board(GameState *g) {
@@ -153,86 +163,45 @@ static int path_clear(GameState *g, int r1, int c1, int r2, int c2) {
     return 1;
 }
 
-static int is_legal_move(GameState *g, int color, int r1,int c1,int r2,int c2) {
-    if (!in_bounds(r1,c1) || !in_bounds(r2,c2)) return 0;
-    Piece p = g->board[r1][c1];
-    if (piece_color(p) != color) return 0;
-    Piece t = g->board[r2][c2];
-    if (piece_color(t) == color) return 0;
+/* return 1 if square (r,c) is attacked by any piece of by_color */
+static int is_square_attacked(GameState *g, int r, int c, int by_color) {
+    for (int r0 = 0; r0 < 8; ++r0) {
+        for (int c0 = 0; c0 < 8; ++c0) {
+            Piece p = g->board[r0][c0];
+            if (piece_color(p) != by_color) continue;
+            int dr = r - r0;
+            int dc = c - c0;
+            int absdr = dr < 0 ? -dr : dr;
+            int absdc = dc < 0 ? -dc : dc;
 
-    int dr = r2 - r1;
-    int dc = c2 - c1;
-
-    int absdr = (dr<0 ? -dr : dr);
-    int absdc = (dc<0 ? -dc : dc);
-
-    // Pawn
-    if (p == WPAWN) {
-        if (c1 == c2 && g->board[r2][c2] == EMPTY) {
-            if (dr == -1) return 1;
-            if (r1 == 6 && dr == -2 && g->board[5][c1] == EMPTY) return 1;
+            switch (p) {
+                case WPAWN:
+                    /* white pawns attack one rank up (r0-1) and one file left/right */
+                    if (r == r0 - 1 && (c == c0 - 1 || c == c0 + 1)) return 1;
+                    break;
+                case BPAWN:
+                    if (r == r0 + 1 && (c == c0 - 1 || c == c0 + 1)) return 1;
+                    break;
+                case WKNIGHT: case BKNIGHT:
+                    if ((absdr==2 && absdc==1) || (absdr==1 && absdc==2)) return 1;
+                    break;
+                case WBISHOP: case BBISHOP:
+                    if (absdr == absdc && path_clear(g, r0, c0, r, c)) return 1;
+                    break;
+                case WROOK: case BROOK:
+                    if ((dr==0 || dc==0) && path_clear(g, r0, c0, r, c)) return 1;
+                    break;
+                case WQUEEN: case BQUEEN:
+                    if ((absdr==absdc || dr==0 || dc==0) && path_clear(g, r0, c0, r, c)) return 1;
+                    break;
+                case WKING: case BKING:
+                    if (absdr <= 1 && absdc <= 1) return 1;
+                    break;
+                default:
+                    break;
+            }
         }
-        if (absdc == 1 && dr == -1 && t < 0) return 1; 
-        return 0;
     }
-    if (p == BPAWN) {
-        if (c1 == c2 && g->board[r2][c2] == EMPTY) {
-            if (dr == 1) return 1;
-            if (r1 == 1 && dr == 2 && g->board[2][c1] == EMPTY) return 1;
-        }
-        if (absdc == 1 && dr == 1 && t > 0) return 1;
-        return 0;
-    }
-
-    // Knight
-    if (p == WKNIGHT || p == BKNIGHT) {
-        return (absdr==2 && absdc==1) || (absdr==1 && absdc==2);
-    }
-
-    // Bishop
-    if (p == WBISHOP || p == BBISHOP) {
-        if (absdr != absdc) return 0;
-        int sr = (dr>0?1:-1), sc = (dc>0?1:-1);
-        for (int r=r1+sr, c=c1+sc; r!=r2; r+=sr, c+=sc)
-            if (g->board[r][c] != EMPTY) return 0;
-        return 1;
-    }
-
-    // Rook
-    if (p == WROOK || p == BROOK) {
-        if (dr!=0 && dc!=0) return 0;
-        int sr = (dr==0?0:(dr>0?1:-1));
-        int sc = (dc==0?0:(dc>0?1:-1));
-        for (int r=r1+sr, c=c1+sc; r!=r2||c!=c2; r+=sr,c+=sc)
-            if (g->board[r][c] != EMPTY) return 0;
-        return 1;
-    }
-
-    // Queen
-    if (p == WQUEEN || p == BQUEEN) {
-        if (absdr == absdc) {
-            int sr = (dr>0?1:-1), sc = (dc>0?1:-1);
-            for (int r=r1+sr, c=c1+sc; r!=r2; r+=sr,c+=sc)
-                if (g->board[r][c] != EMPTY) return 0;
-            return 1;
-        }
-        if (dr==0 || dc==0) {
-            int sr = (dr==0?0:(dr>0?1:-1));
-            int sc = (dc==0?0:(dc>0?1:-1));
-            for (int r=r1+sr, c=c1+sc; r!=r2||c!=c2; r+=sr,c+=sc)
-                if (g->board[r][c] != EMPTY) return 0;
-            return 1;
-        }
-        return 0;
-    }
-
-    
-
-    // King (no castling here yet)
-    if (p == WKING || p == BKING) {
-        return absdr<=1 && absdc<=1;
-    }
-
     return 0;
 }
 
@@ -303,6 +272,17 @@ static int is_legal_move_basic(Match *m, int color, int r1, int c1, int r2, int 
 
         /* castling: king attempts to move 2 files horizontally on starting rank */
         if (r1 == r2 && absdc == 2) {
+
+            /* check that the king doesn't cross an attacked square */
+            int opp = 1 - color;
+            if (is_square_attacked(g, r1, c1, opp)) return 0; /* king currently in check */
+            if (c2 == 6) { /* kingside: check squares c=5 and c=6 */
+                if (is_square_attacked(g, r1, 5, opp) || is_square_attacked(g, r1, 6, opp)) return 0;
+            }
+            if (c2 == 2) { /* queenside: check squares c=3 and c=2 (king passes through c=3) */
+                if (is_square_attacked(g, r1, 3, opp) || is_square_attacked(g, r1, 2, opp)) return 0;
+            }
+
             /* basic checks: king on starting square, rook present on that side, path clear */
             if (color == 0) {
                 /* white must be on rank 7? (board indexing: 0=black back rank, 7=white back rank) */
@@ -380,6 +360,15 @@ static void apply_move(Match *m, int r1,int c1,int r2,int c2, char promo_char) {
         return;
     }
 
+    /* check for rook capure */
+    if  (g->board[r2][c2] == WROOK) {
+        if (r2 == 7 && c2 == 7) m->w_can_kingside = 0;
+        if (r2 == 7 && c2 == 0) m->w_can_queenside = 0;
+    }
+        if  (g->board[r2][c2] == BROOK) {
+        if (r2 == 0 && c2 == 7) m->b_can_kingside = 0;
+        if (r2 == 0 && c2 == 0) m->b_can_queenside = 0;
+    }
     /* normal move */
     g->board[r2][c2] = p;
     g->board[r1][c1] = EMPTY;
@@ -395,15 +384,6 @@ static void apply_move(Match *m, int r1,int c1,int r2,int c2, char promo_char) {
     if (p == BROOK) {
         if (r1 == 0 && c1 == 7) m->b_can_kingside = 0;
         if (r1 == 0 && c1 == 0) m->b_can_queenside = 0;
-    }
-    /* If a rook was captured on its original square, revoke the opponent's castling right */
-    if (g->board[r2][c2] != EMPTY) {
-        /* g->board[r2][c2] already set to p (moved piece), but we can check captured piece
-           by seeing whether r2,c2 was a rook before the assignment; to make this robust we need
-           to use captured variable prior to overwrite. However in our call sites we previously
-           captured the target piece before calling apply_move; we will keep that behaviour.
-           For simplicity here we won't attempt to detect captured rook -> but the initial
-           approach of revoking rights when a rook moves will cover most use cases. */
     }
 
     /* pawn double step -> set en-passant target (square behind the pawn after double move) */
@@ -496,47 +476,6 @@ static int find_king(GameState *g, int color, int *rk, int *ck) {
     return 0;
 }
 
-/* return 1 if square (r,c) is attacked by any piece of by_color */
-static int is_square_attacked(GameState *g, int r, int c, int by_color) {
-    for (int r0 = 0; r0 < 8; ++r0) {
-        for (int c0 = 0; c0 < 8; ++c0) {
-            Piece p = g->board[r0][c0];
-            if (piece_color(p) != by_color) continue;
-            int dr = r - r0;
-            int dc = c - c0;
-            int absdr = dr < 0 ? -dr : dr;
-            int absdc = dc < 0 ? -dc : dc;
-
-            switch (p) {
-                case WPAWN:
-                    /* white pawns attack one rank up (r0-1) and one file left/right */
-                    if (r == r0 - 1 && (c == c0 - 1 || c == c0 + 1)) return 1;
-                    break;
-                case BPAWN:
-                    if (r == r0 + 1 && (c == c0 - 1 || c == c0 + 1)) return 1;
-                    break;
-                case WKNIGHT: case BKNIGHT:
-                    if ((absdr==2 && absdc==1) || (absdr==1 && absdc==2)) return 1;
-                    break;
-                case WBISHOP: case BBISHOP:
-                    if (absdr == absdc && path_clear(g, r0, c0, r, c)) return 1;
-                    break;
-                case WROOK: case BROOK:
-                    if ((dr==0 || dc==0) && path_clear(g, r0, c0, r, c)) return 1;
-                    break;
-                case WQUEEN: case BQUEEN:
-                    if ((absdr==absdc || dr==0 || dc==0) && path_clear(g, r0, c0, r, c)) return 1;
-                    break;
-                case WKING: case BKING:
-                    if (absdr <= 1 && absdc <= 1) return 1;
-                    break;
-                default:
-                    break;
-            }
-        }
-    }
-    return 0;
-}
 
 static int is_in_check(GameState *g, int color) {
     int kr, kc;
@@ -603,6 +542,8 @@ static int has_any_legal_move(Match *m, int color) {
     return 0;
 }
 
+/* Forward */
+static void *match_watchdog(void *arg);
 
 /* create a new match for two clients (waiting becomes white, newcomer black) */
 static Match *match_create(Client *white, Client *black) {
@@ -629,7 +570,67 @@ static Match *match_create(Client *white, Client *black) {
     m->ep_c = -1;
 
     init_board(&m->state); /* initialize game state */
+
+    /* initialization for inactivity detection */
+    m->last_move_time = time(NULL); /* turn (white) starts now */
+    m->turn_timeout_seconds = TURN_TIMEOUT_SECONDS;
+
+    /* start a detached watchdog thread for this match */
+    pthread_t wt;
+    if (pthread_create(&wt, NULL, match_watchdog, m) == 0) {
+        pthread_detach(wt);
+    }
+
     return m;
+}
+
+/* watchdog thread for a match: ends match if current player exceeds inactivity timeout */
+static void *match_watchdog(void *arg) {
+    Match *m = (Match *)arg;
+    if (!m) return NULL;
+
+    while (1) {
+        sleep(2); /* check every 2 seconds */
+
+        pthread_mutex_lock(&m->lock);
+        if (m->finished) {
+            pthread_mutex_unlock(&m->lock);
+            break;
+        }
+        time_t now = time(NULL);
+        time_t last = m->last_move_time;
+        int timeout = m->turn_timeout_seconds;
+        int timed_out = 0;
+
+        if (last != 0 && timeout > 0 && (now - last) >= timeout) {
+            /* the player whose turn it is failed to act in time */
+            timed_out = 1;
+        }
+
+        if (timed_out) {
+            /* Determine inactive (timed-out) and winner */
+            Client *inactive = (m->turn == 0) ? m->white : m->black;
+            Client *winner   = (m->turn == 0) ? m->black : m->white;
+
+            /* mark finished */
+            m->finished = 1;
+
+            /* send messages if sockets exist */
+            if (inactive && inactive->sock > 0) {
+                send_line(inactive->sock, "TIMEOUT"); /* you timed out */
+            }
+            if (winner && winner->sock > 0) {
+                send_line(winner->sock, "OPPONENT_TIMEOUT"); /* opponent timed out -> you win */
+            }
+
+            pthread_mutex_unlock(&m->lock);
+            break;
+        } else {
+            pthread_mutex_unlock(&m->lock);
+        }
+    }
+
+    return NULL;
 }
 
 
@@ -786,13 +787,66 @@ static void *client_worker(void *arg) {
         me->color = 0; /* will be WHITE */
         me->paired = 0;
         send_line(me->sock, "WAITING");
-        printf("%s (peer %s) is waiting on %s %s\n", me->name, me->client_addr, me->server_ifname, me->server_ip);
+        printf("%s is waiting for opponent\n", me->name);
 
-        /* busy wait until paired (small sleep) */
+        /* wait until paired but also detect if client closed connection.
+           Server now enforces matchmaking timeout (MATCHMAKING_TIMEOUT_SECONDS) server-side.
+        */
+        time_t wait_start = time(NULL);
+        int search_timeout = MATCHMAKING_TIMEOUT_SECONDS;
+        if (search_timeout <= 0) search_timeout = 1;
+
         while (!me->paired) {
             usleep(200000); /* 200ms */
-            /* detect socket closure quickly would require select/poll - for brevity we rely on recv later */
+
+            /* Detect peer closure quickly with non-blocking peek */
+            char tmp;
+            ssize_t rr = recv(me->sock, &tmp, 1, MSG_PEEK | MSG_DONTWAIT);
+            if (rr == 0) {
+                /* peer closed connection — remove from waiting queue and exit */
+                pthread_mutex_lock(&wait_mutex);
+                if (waiting_client == me) waiting_client = NULL;
+                pthread_mutex_unlock(&wait_mutex);
+
+                close(me->sock);
+                printf("%s disconnected while waiting (socket closed)\n", me->name);
+                free(me);
+                return NULL;
+            } else if (rr < 0) {
+                if (errno != EAGAIN && errno != EWOULDBLOCK) {
+                    /* socket error: treat as closed */
+                    pthread_mutex_lock(&wait_mutex);
+                    if (waiting_client == me) waiting_client = NULL;
+                    pthread_mutex_unlock(&wait_mutex);
+
+                    close(me->sock);
+                    perror("recv(MSG_PEEK)");
+                    printf("%s disconnected while waiting (socket error)\n", me->name);
+                    free(me);
+                    return NULL;
+                }
+                /* rr < 0 with EAGAIN/EWOULDBLOCK -> no data pending, still alive */
+            }
+
+            /* Check server-side matchmaking timeout */
+            time_t now = time(NULL);
+            if (difftime(now, wait_start) >= search_timeout) {
+                /* timed out waiting for opponent: inform client and close connection */
+                pthread_mutex_lock(&wait_mutex);
+                if (waiting_client == me) waiting_client = NULL;
+                pthread_mutex_unlock(&wait_mutex);
+
+                /* server-side message (explicit): MATCHMAKING_TIMEOUT */
+                send_line(me->sock, "MATCHMAKING_TIMEOUT");
+
+                /* close the socket and free the client (server cleans up) */
+                close(me->sock);
+                printf("%s matchmaking timed out after %d seconds\n", me->name, search_timeout);
+                free(me);
+                return NULL;
+            }
         }
+
     } else {
         /* pair with waiting client */
         Client *op = waiting_client;
@@ -897,6 +951,7 @@ static void *client_worker(void *arg) {
                                     /* mark finished if mate or stalemate so future moves are rejected */
                                     if ((opp_in_check && !opp_has_move) || (!opp_in_check && !opp_has_move)) {
                                         myMatch->finished = 1;
+                                        myMatch->last_move_time = 0;
                                     }
 
                                     /* send OK to mover first (client expects OK_MOVE) */
@@ -919,6 +974,7 @@ static void *client_worker(void *arg) {
                                         /* mover delivered checkmate to opponent */
                                         if (opp && opp->sock > 0) send_line(opp->sock, "CHECKMATE");
                                         send_line(me->sock, "CHECKMATE_WIN");
+                                        printf("%s won by checkmate against %s\n", me->name, opp->name);
                                     }
 
                                     /* stalemate: no legal moves and not in check */
@@ -926,11 +982,16 @@ static void *client_worker(void *arg) {
                                         /* send STALEMATE to both sides so they can display neutral overlay */
                                         if (opp && opp->sock > 0) send_line(opp->sock, "STALEMATE");
                                         send_line(me->sock, "STALEMATE");
+                                        printf("%s and %s ended up in a stalemate\n", me->name, opp->name);
                                     }
 
                                     /* flip turn only if game continues */
                                     if (!myMatch->finished) {
                                         myMatch->turn = 1 - myMatch->turn;
+                                        myMatch->last_move_time = time(NULL); /* start timer for new player */
+                                    } else {
+                                        /* if finished, freeze time (no further timeout) */
+                                        myMatch->last_move_time = 0;
                                     }
 
                                     pthread_mutex_unlock(&myMatch->lock);
@@ -942,19 +1003,22 @@ static void *client_worker(void *arg) {
                     /* mark finished and notify opponent */
                     pthread_mutex_lock(&myMatch->lock);
                     myMatch->finished = 1;
+                    myMatch->last_move_time = 0;
                     pthread_mutex_unlock(&myMatch->lock);
 
                     Client *opp = (me == myMatch->white) ? myMatch->black : myMatch->white;
                     
-                    /* Send CHECKMATE to resigning player (they lost) */
+                    /* Send RESIGN to resigning player (they lost) */
                     send_line(me->sock, "RESIGN");
-                    
-                    /* Send CHECKMATE_WIN to opponent (they won) */
+                    printf("%s resigned against %s\n", me->name, opp->name);
+                    /* Send OPPONENT_RESIGNED to opponent (they won) */
                     if (opp && opp->sock > 0) {
                         send_line(opp->sock, "OPPONENT_RESIGNED");
                     }
+                    goto cleanup;
                 } else if (strncmp(linebuf, "DRAW_OFFER", 10) == 0) {
                     Client *opp = (me == myMatch->white) ? myMatch->black : myMatch->white;
+                    printf("%s is offering %s a draw\n", me->name, opp->name);
                     pthread_mutex_lock(&myMatch->lock);
                     if (myMatch->draw_offered_by != -1) {
                         /* there is already a pending draw offer (reject) */
@@ -972,6 +1036,7 @@ static void *client_worker(void *arg) {
                     }
                 } else if (strncmp(linebuf, "DRAW_ACCEPT", 11) == 0) {
                     Client *opp = (me == myMatch->white) ? myMatch->black : myMatch->white;
+                    printf("%s accepted %s's draw offer\n", me->name, opp->name);
                     pthread_mutex_lock(&myMatch->lock);
                     /* only accept a draw if opponent actually offered it */
                     if (myMatch->draw_offered_by == -1 || myMatch->draw_offered_by == me->color) {
@@ -981,13 +1046,15 @@ static void *client_worker(void *arg) {
                         /* accept: clear pending offer, mark finished, notify both */
                         myMatch->draw_offered_by = -1;
                         myMatch->finished = 1;
+                        myMatch->last_move_time = 0;
                         pthread_mutex_unlock(&myMatch->lock);
                         if (opp && opp->sock > 0) send_line(opp->sock, "DRAW_ACCEPTED");
                         send_line(me->sock, "DRAW_ACCEPTED");
                         goto cleanup;
                     }
-                } else if (strncmp(linebuf, "DRAW_DECLINE", 11) == 0) {
+                } else if (strncmp(linebuf, "DRAW_DECLINE", 12) == 0) {
                     Client *opp = (me == myMatch->white) ? myMatch->black : myMatch->white;
+                    printf("%s declined %s's draw offer\n", me->name, opp->name);
                     pthread_mutex_lock(&myMatch->lock);
                     /* decline only allowed if opponent offered */
                     if (myMatch->draw_offered_by == -1 || myMatch->draw_offered_by == me->color) {
@@ -1006,9 +1073,11 @@ static void *client_worker(void *arg) {
                     /* Treat explicit QUIT as opponent leaving -> opponent wins */
                     pthread_mutex_lock(&myMatch->lock);
                     myMatch->finished = 1;
+                    myMatch->last_move_time = 0;
                     pthread_mutex_unlock(&myMatch->lock);
 
                     Client *opp = (me == myMatch->white) ? myMatch->black : myMatch->white;
+                    printf("%s quit their match against %s\n", me->name, opp->name);
                     if (opp && opp->sock > 0) {
                         /* Notify opponent that their opponent quit and that they won */
                         send_line(opp->sock, "OPPONENT_QUIT");
@@ -1067,8 +1136,6 @@ cleanup:
                The opponent thread will free it when it exits/receives QUIT. */
         }
     }
-
-
 
     free(me);
     return NULL;
