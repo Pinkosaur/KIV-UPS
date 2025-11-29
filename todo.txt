@@ -2,5 +2,6 @@
 - refine UI backgrounds/messages, remove "?" from popups
 - client/server ping + disconnection timeout if failed?
 - fragment code into separate files
-- squares stay square on resize
-- random client names
+- fix client not closing
+
+- remove client logging box
