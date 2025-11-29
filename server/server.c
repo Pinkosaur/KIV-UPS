@@ -58,7 +58,7 @@
 #define BACKLOG 10
 #define BUF_SZ 1024
 #define LINEBUF_SZ 4096
-#define TURN_TIMEOUT_SECONDS 120
+#define TURN_TIMEOUT_SECONDS 180
 #define MATCHMAKING_TIMEOUT_SECONDS 10
 
 /* forward */
@@ -116,7 +116,12 @@ struct Match {
     int draw_offered_by; /* -1 = none, 0 = white offered, 1 = black offered */
     time_t last_move_time; /* time when current turn started */
     int turn_timeout_seconds;
+
+    /* NEW: how many client threads must run cleanup before the match can be freed.
+       Initialized to 2 when a match is created (two client threads). */
+    int refs;
 };
+
 
 static void init_board(GameState *g) {
     Piece init[8][8] = {
@@ -575,6 +580,9 @@ static Match *match_create(Client *white, Client *black) {
     m->last_move_time = time(NULL); /* turn (white) starts now */
     m->turn_timeout_seconds = TURN_TIMEOUT_SECONDS;
 
+    /* initialize client cleanup refcount: two client threads (white & black) */
+    m->refs = 2;
+
     /* start a detached watchdog thread for this match */
     pthread_t wt;
     if (pthread_create(&wt, NULL, match_watchdog, m) == 0) {
@@ -593,6 +601,10 @@ static void *match_watchdog(void *arg) {
         sleep(2); /* check every 2 seconds */
 
         pthread_mutex_lock(&m->lock);
+        if (m->refs <= 0) {
+            pthread_mutex_unlock(&m->lock);
+            break;
+        }
         if (m->finished) {
             pthread_mutex_unlock(&m->lock);
             break;
@@ -615,12 +627,18 @@ static void *match_watchdog(void *arg) {
             /* mark finished */
             m->finished = 1;
 
-            /* send messages if sockets exist */
+            /* send messages if sockets exist and close them */
             if (inactive && inactive->sock > 0) {
                 send_line(inactive->sock, "TIMEOUT"); /* you timed out */
+                shutdown(inactive->sock, SHUT_RDWR);
+                close(inactive->sock);
+                inactive->sock = -1;
             }
             if (winner && winner->sock > 0) {
                 send_line(winner->sock, "OPPONENT_TIMEOUT"); /* opponent timed out -> you win */
+                shutdown(winner->sock, SHUT_RDWR);
+                close(winner->sock);
+                winner->sock = -1;
             }
 
             pthread_mutex_unlock(&m->lock);
@@ -642,6 +660,61 @@ static void match_free(Match *m) {
     pthread_mutex_destroy(&m->lock);
     free(m);
 }
+
+/* Called by a client thread during its cleanup path.
+   Ensures:
+   - notify / wake opponent so it will exit recv()
+   - decrement match->refs (under lock)
+   - free match only when both client threads have reached cleanup (refs==0)
+*/
+static void match_release_after_client(Client *me) {
+    if (!me || !me->match) return;
+    Match *m = me->match;
+    Client *other = (me == m->white) ? m->black : m->white;
+
+    /* First: mark finished and notify opponent (under lock) and wake recv() */
+    pthread_mutex_lock(&m->lock);
+    if (!m->finished) {
+        m->finished = 1;
+        if (other && other->sock > 0) {
+            send_line(other->sock, "OPPONENT_QUIT");
+        }
+    }
+
+    /* Wake the other thread (if blocked in recv) so it can run its cleanup */
+    if (other && other->sock > 0) {
+        /* shutdown wakes blocked recv() on the other side */
+        shutdown(other->sock, SHUT_RDWR);
+    }
+
+    /* clear our match pointer (we do not free the Client here) */
+    me->match = NULL;
+
+    /* decrement refs under lock, remember whether we're the last */
+    m->refs--;
+    int last = (m->refs <= 0);
+    pthread_mutex_unlock(&m->lock);
+
+    if (last) {
+        /* Both client threads reached cleanup. At this point both clients
+           should have closed/marked their sockets; but for safety ensure sockets
+           are shut/closed before freeing the match. */
+        if (m->white && m->white->sock > 0) {
+            shutdown(m->white->sock, SHUT_RDWR);
+            close(m->white->sock);
+            m->white->sock = -1;
+        }
+        if (m->black && m->black->sock > 0) {
+            shutdown(m->black->sock, SHUT_RDWR);
+            close(m->black->sock);
+            m->black->sock = -1;
+        }
+
+        /* finally free match resources */
+        match_free(m);
+    }
+}
+
 
 /* Print all IPv4 interfaces and addresses on startup */
 static void list_local_interfaces(void) {
@@ -735,6 +808,21 @@ static void match_close_and_notify(Match *m, Client *leaver, const char *reason_
 }
 
 
+/* Send a textual line to a Client* and log to server console.
+   Keeps a single place for logging so every message the client receives is visible on server. */
+static void send_line_client(Client *c, const char *msg) {
+    if (!c) return;
+    if (c->sock > 0) {
+        send_line(c->sock, msg);
+        printf("SENT -> %s (%s) : %s\n", c->name[0] ? c->name : "(unknown)", c->client_addr, msg);
+    } else {
+        /* No socket available (already closed) — still log the intent. */
+        printf("SENT -> %s (no socket) : %s\n", c->name[0] ? c->name : "(unknown)", msg);
+    }
+}
+
+
+
 /* client thread */
 static void *client_worker(void *arg) {
     Client *me = (Client *)arg;
@@ -752,7 +840,7 @@ static void *client_worker(void *arg) {
     int got_hello = 0;
     while (!got_hello) {
         r = recv(me->sock, readbuf, sizeof(readbuf), 0);
-        if (r <= 0) { close(me->sock); free(me); return NULL; }
+        if (r <= 0) { shutdown(me->sock, SHUT_RDWR); close(me->sock); free(me); return NULL; }
         for (ssize_t i = 0; i < r; ++i) {
             if (lp + 1 < sizeof(linebuf)) linebuf[lp++] = readbuf[i];
             if (readbuf[i] == '\n') {
@@ -808,6 +896,7 @@ static void *client_worker(void *arg) {
                 if (waiting_client == me) waiting_client = NULL;
                 pthread_mutex_unlock(&wait_mutex);
 
+                shutdown(me->sock, SHUT_RDWR);
                 close(me->sock);
                 printf("%s disconnected while waiting (socket closed)\n", me->name);
                 free(me);
@@ -819,6 +908,7 @@ static void *client_worker(void *arg) {
                     if (waiting_client == me) waiting_client = NULL;
                     pthread_mutex_unlock(&wait_mutex);
 
+                    shutdown(me->sock, SHUT_RDWR);
                     close(me->sock);
                     perror("recv(MSG_PEEK)");
                     printf("%s disconnected while waiting (socket error)\n", me->name);
@@ -840,6 +930,7 @@ static void *client_worker(void *arg) {
                 send_line(me->sock, "MATCHMAKING_TIMEOUT");
 
                 /* close the socket and free the client (server cleans up) */
+                shutdown(me->sock, SHUT_RDWR);
                 close(me->sock);
                 printf("%s matchmaking timed out after %d seconds\n", me->name, search_timeout);
                 free(me);
@@ -857,6 +948,7 @@ static void *client_worker(void *arg) {
         Match *m = match_create(op, me);
         if (!m) {
             send_line(me->sock, "ERROR Server internal");
+            shutdown(me->sock, SHUT_RDWR);
             close(me->sock);
             free(me);
             return NULL;
@@ -989,12 +1081,24 @@ static void *client_worker(void *arg) {
                                     if (!myMatch->finished) {
                                         myMatch->turn = 1 - myMatch->turn;
                                         myMatch->last_move_time = time(NULL); /* start timer for new player */
+                                        pthread_mutex_unlock(&myMatch->lock);
                                     } else {
-                                        /* if finished, freeze time (no further timeout) */
-                                        myMatch->last_move_time = 0;
+                                        /* send BYE to both clients (if still connected) and close their sockets server-side */
+                                        if (myMatch->white && myMatch->white->sock > 0) {
+                                            send_line(myMatch->white->sock, "BYE");
+                                            shutdown(myMatch->white->sock, SHUT_RDWR); /* wake any blocked recv on that socket */
+                                            close(myMatch->white->sock);
+                                            myMatch->white->sock = -1;
+                                        }
+                                        if (myMatch->black && myMatch->black->sock > 0) {
+                                            send_line(myMatch->black->sock, "BYE");
+                                            shutdown(myMatch->black->sock, SHUT_RDWR);
+                                            close(myMatch->black->sock);
+                                            myMatch->black->sock = -1;
+                                        }
+                                        pthread_mutex_unlock(&myMatch->lock);
+                                        goto cleanup;
                                     }
-
-                                    pthread_mutex_unlock(&myMatch->lock);
                                 }
                             }
                         }
@@ -1029,27 +1133,53 @@ static void *client_worker(void *arg) {
                         myMatch->draw_offered_by = me->color;
                         pthread_mutex_unlock(&myMatch->lock);
                         send_line(opp->sock, "DRAW_OFFER");
-                        send_line(me->sock, "OK"); /* ack local */
                     } else {
                         pthread_mutex_unlock(&myMatch->lock);
                         send_error(me, "No opponent");
                     }
                 } else if (strncmp(linebuf, "DRAW_ACCEPT", 11) == 0) {
                     Client *opp = (me == myMatch->white) ? myMatch->black : myMatch->white;
-                    printf("%s accepted %s's draw offer\n", me->name, opp->name);
+                    printf("%s accepted %s's draw offer\n", me->name, opp ? opp->name : "(unknown)");
                     pthread_mutex_lock(&myMatch->lock);
                     /* only accept a draw if opponent actually offered it */
                     if (myMatch->draw_offered_by == -1 || myMatch->draw_offered_by == me->color) {
                         pthread_mutex_unlock(&myMatch->lock);
                         send_error(me, "No draw offer to accept");
                     } else {
-                        /* accept: clear pending offer, mark finished, notify both */
+                        /* mark finished and clear pending offer */
                         myMatch->draw_offered_by = -1;
                         myMatch->finished = 1;
                         myMatch->last_move_time = 0;
+
+                        /* copy sockets locally and mark them -1 under lock so other code won't try to use them */
+                        int me_sock  = me->sock;
+                        int opp_sock = (opp ? opp->sock : -1);
+
+                        /* mark sockets invalid in client structs so other code won't send on them */
+                        if (opp) opp->sock = -1;
+                        me->sock = -1;
+
                         pthread_mutex_unlock(&myMatch->lock);
-                        if (opp && opp->sock > 0) send_line(opp->sock, "DRAW_ACCEPTED");
-                        send_line(me->sock, "DRAW_ACCEPTED");
+
+                        /* Send DRAW_ACCEPTED to both if connected (use the copied fds) */
+                        if (opp_sock > 0) send_line(opp_sock, "DRAW_ACCEPTED");
+                        if (me_sock  > 0) send_line(me_sock,  "DRAW_ACCEPTED");
+
+                        /* Important: wake blocked recv() callers on both sockets, then send BYE and close.
+                        shutdown() ensures the peer thread's recv() returns promptly so it can run its cleanup. */
+                        if (opp_sock > 0) {
+                            /* send BYE, then shutdown and close */
+                            send_line(opp_sock, "BYE");
+                            shutdown(opp_sock, SHUT_RDWR);
+                            close(opp_sock);
+                        }
+                        if (me_sock > 0) {
+                            send_line(me_sock, "BYE");
+                            shutdown(me_sock, SHUT_RDWR);
+                            close(me_sock);
+                        }
+
+                        /* now jump to cleanup; the usual cleanup code (or match_release_after_client) will handle match freeing */
                         goto cleanup;
                     }
                 } else if (strncmp(linebuf, "DRAW_DECLINE", 12) == 0) {
@@ -1067,7 +1197,6 @@ static void *client_worker(void *arg) {
                         if (opp && opp->sock > 0) {
                             send_line(opp->sock, "DRAW_DECLINED");
                         }
-                        send_line(me->sock, "OK");
                     }              
                 } else if (strncmp(linebuf, "QUIT", 4) == 0) {
                     /* Treat explicit QUIT as opponent leaving -> opponent wins */
@@ -1097,7 +1226,7 @@ static void *client_worker(void *arg) {
 
 cleanup:
     /* cleanup client: close socket, free, notify other and free match */
-    close(me->sock);
+    if (me->sock > 0) shutdown(me->sock, SHUT_RDWR); close(me->sock);
     printf("%s disconnected (peer %s) on %s %s\n", me->name, me->client_addr, me->server_ifname, me->server_ip);
 
     /* if we were in waiting queue, remove */
@@ -1105,37 +1234,8 @@ cleanup:
     if (waiting_client == me) waiting_client = NULL;
     pthread_mutex_unlock(&wait_mutex);
 
-    /* handle match cleanup: if other side still exists, let them know (done on commands above) */
-    if (me->match) {
-        Match *m = me->match;
-        Client *other = (me == m->white) ? m->black : m->white;
+    match_release_after_client(me);
 
-        /* protect match while we touch it */
-        pthread_mutex_lock(&m->lock);
-
-        /* If match not already finished, mark it finished and notify opponent */
-        if (!m->finished) {
-            m->finished = 1;
-            if (other && other->sock > 0) {
-                /* Notify opponent that the other side disconnected and that they won */
-                send_line(other->sock, "OPPONENT_QUIT");
-            }
-        }
-
-        /* Clear opponent's match pointer so their thread won't reuse this match pointer */
-        if (other && other->sock > 0) {
-            other->match = NULL;
-        }
-        pthread_mutex_unlock(&m->lock);
-
-        /* Only free the match if the opponent is not connected (avoid freeing while opponent thread may use it) */
-        if (!other || other->sock <= 0) {
-            match_free(m);
-        } else {
-            /* if opponent still connected, leave the match allocated.
-               The opponent thread will free it when it exits/receives QUIT. */
-        }
-    }
 
     free(me);
     return NULL;
@@ -1160,10 +1260,10 @@ int main(void) {
     list_local_interfaces();
 
     if (bind(srv, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-        perror("bind"); close(srv); return 1;
+        perror("bind"); shutdown(srv, SHUT_RDWR); close(srv); return 1;
     }
     if (listen(srv, BACKLOG) < 0) {
-        perror("listen"); close(srv); return 1;
+        perror("listen"); shutdown(srv, SHUT_RDWR); close(srv); return 1;
     }
 
     printf("Server listening on all interfaces, port %d\n", PORT);
@@ -1179,6 +1279,7 @@ int main(void) {
 
         Client *c = calloc(1, sizeof(Client));
         if (!c) {
+            shutdown(csock, SHUT_RDWR);
             close(csock);
             continue;
         }
@@ -1219,6 +1320,7 @@ int main(void) {
         pthread_t tid;
         if (pthread_create(&tid, NULL, client_worker, c) != 0) {
             perror("pthread_create");
+            shutdown(csock, SHUT_RDWR);
             close(csock);
             free(c);
         } else {
@@ -1226,6 +1328,7 @@ int main(void) {
         }
     }
 
+    shutdown(srv, SHUT_RDWR);
     close(srv);
     return 0;
 }

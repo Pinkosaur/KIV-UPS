@@ -21,7 +21,18 @@ public class ChessClientGUI {
     private static final String PIECES_DIR = "client/pieces"; // relative to working dir
     private static final String BACK_DIR = "client/backgrounds"; // placeholders
     private static final int SQUARE_SIZE = 64;
-    private String clientName = "JavaClient";
+    private String clientName;
+    // --- Random name generator data ---
+    private static final String[] NAME_ADJECTIVES = {"Brilliant","Interesting","Amazing","Quick","Clever","Curious","Lucky","Silent","Bold","Fierce","Gentle","Merry","Young","Old","Special","Talented"};
+    private static final String[] NAME_NOUNS = {"Magician","Llama","Explorer","Fox","Pioneer","Wanderer","Scholar","Knight","Builder","Artist","Nimbus"};
+
+    private String generateRandomName() {
+        java.util.Random rnd = new java.util.Random();
+        String adj = NAME_ADJECTIVES[rnd.nextInt(NAME_ADJECTIVES.length)];
+        String noun = NAME_NOUNS[rnd.nextInt(NAME_NOUNS.length)];
+        int num = rnd.nextInt(100); // 0..99
+        return adj + noun + num;
+    }
     private JTextField nameField;
 
     // waiting-for-match timeout (milliseconds)
@@ -50,6 +61,13 @@ public class ChessClientGUI {
     private char[][] board = new char[8][8];
 
     private Map<Character, ImageIcon> pieceIcons = new HashMap<>();
+    // raw piece images (original sized) and a cache of scaled icons by size
+    private final Map<Character, BufferedImage> pieceImagesRaw = new HashMap<>();
+    private final Map<Integer, Map<Character, ImageIcon>> iconCacheBySize = new HashMap<>();
+
+    // wrapper panel that will center the board and enforce square sizing
+    private JPanel boardContainer;
+
 
     // interaction state
     private int myColor = -1; // 0 white, 1 black
@@ -153,13 +171,15 @@ public class ChessClientGUI {
         map.put('q', "black-queen.png");
         map.put('k', "black-king.png");
 
+        pieceImagesRaw.clear();
+        iconCacheBySize.clear();
+
         for (Map.Entry<Character, String> e : map.entrySet()) {
             File f = new File(PIECES_DIR, e.getValue());
             if (f.exists()) {
                 try {
                     BufferedImage img = ImageIO.read(f);
-                    Image scaled = img.getScaledInstance(SQUARE_SIZE, SQUARE_SIZE, Image.SCALE_SMOOTH);
-                    pieceIcons.put(e.getKey(), new ImageIcon(scaled));
+                    pieceImagesRaw.put(e.getKey(), img);
                 } catch (IOException ex) {
                     System.err.println("Failed to load " + f + " : " + ex.getMessage());
                 }
@@ -167,6 +187,25 @@ public class ChessClientGUI {
                 System.err.println("Piece image not found: " + f.getPath());
             }
         }
+    }
+
+    private ImageIcon getScaledIconForPiece(char p, int cellSize) {
+        if (p == '.' || cellSize <= 0) return null;
+        Map<Character, ImageIcon> cache = iconCacheBySize.get(cellSize);
+        if (cache != null && cache.containsKey(p)) return cache.get(p);
+
+        BufferedImage src = pieceImagesRaw.get(p);
+        if (src == null) return null;
+
+        Image scaled = src.getScaledInstance(cellSize, cellSize, Image.SCALE_SMOOTH);
+        ImageIcon ico = new ImageIcon(scaled);
+
+        if (cache == null) {
+            cache = new HashMap<>();
+            iconCacheBySize.put(cellSize, cache);
+        }
+        cache.put(p, ico);
+        return ico;
     }
 
     private void initBoardModel() {
@@ -189,7 +228,13 @@ public class ChessClientGUI {
                     int modelC = (myColor == 1) ? (7 - uiC) : uiC;
 
                     char p = board[modelR][modelC];
-                    ImageIcon icon = pieceIcons.get(p);
+
+                    // compute cell size based on actual boardPanel size
+                    int boardPx = Math.min(boardPanel.getWidth(), boardPanel.getHeight());
+                    int cellSize = (boardPx > 0) ? (boardPx / 8) : SQUARE_SIZE;
+
+                    // get scaled icon for this piece and size
+                    ImageIcon icon = getScaledIconForPiece(p, cellSize);
                     squares[uiR][uiC].setIcon(icon);
                     squares[uiR][uiC].setText((icon == null) ? (p=='.'?"":""+p) : "");
 
@@ -279,29 +324,49 @@ public class ChessClientGUI {
             if (r1 == r2 && absdc == 2) {
                 // white original: r==7,c==4; black original: r==0,c==4
                 if (p == 'K') {
+                    int color = 0; int opp = 1;
                     if (!(r1 == 7 && c1 == 4)) return false;
                     // kingside
                     if (c2 == 6) {
                         if (board[7][7] != 'R') return false;
                         if (board[7][5] != '.' || board[7][6] != '.') return false;
-                        return true;
+                        // additional checks: king not currently in check, and passing/landing squares not attacked
+                        if (isSquareAttacked(board, r1, c1, opp)) return false; // currently in check -> no castle
+                        // check the square the king passes through (f-file) and the destination (g-file)
+                        int midC = 5;
+                        if (moveLeavesInCheck(board, color, r1, c1, r1, midC)) return false; // would be in check while passing
+                        if (moveLeavesInCheck(board, color, r1, c1, r2, c2)) return false; 
+                            return true;
                     }
                     // queenside
                     if (c2 == 2) {
                         if (board[7][0] != 'R') return false;
                         if (board[7][1] != '.' || board[7][2] != '.' || board[7][3] != '.') return false;
+                        if (isSquareAttacked(board, r1, c1, opp)) return false;
+                        int midC = 3;
+                        if (moveLeavesInCheck(board, color, r1, c1, r1, midC)) return false;
+                        if (moveLeavesInCheck(board, color, r1, c1, r2, c2)) return false;
                         return true;
                     }
                 } else {
+                    int color = 1; int opp = 0;
                     if (!(r1 == 0 && c1 == 4)) return false;
                     if (c2 == 6) {
                         if (board[0][7] != 'r') return false;
                         if (board[0][5] != '.' || board[0][6] != '.') return false;
+                        if (isSquareAttacked(board, r1, c1, opp)) return false;
+                        int midC = 5;
+                        if (moveLeavesInCheck(board, color, r1, c1, r1, midC)) return false;
+                        if (moveLeavesInCheck(board, color, r1, c1, r2, c2)) return false;
                         return true;
                     }
                     if (c2 == 2) {
                         if (board[0][0] != 'r') return false;
                         if (board[0][1] != '.' || board[0][2] != '.' || board[0][3] != '.') return false;
+                        if (isSquareAttacked(board, r1, c1, opp)) return false;
+                        int midC = 3;
+                        if (moveLeavesInCheck(board, color, r1, c1, r1, midC)) return false;
+                        if (moveLeavesInCheck(board, color, r1, c1, r2, c2)) return false;
                         return true;
                     }
                 }
@@ -385,6 +450,7 @@ public class ChessClientGUI {
     // --- UI and networking ---
     private void createAndShowGUI() {
         loadIcons();
+        clientName = generateRandomName();
 
         frame = new JFrame("Chess Client");
         // don't rely on EXIT_ON_CLOSE — do explicit cleanup so background threads/sockets are closed
@@ -393,7 +459,8 @@ public class ChessClientGUI {
             @Override
             public void windowClosing(java.awt.event.WindowEvent e) {
                 // This runs on the EDT — close network resources cleanly
-                sendQuitAndClose();
+                out.println("QUIT");
+                closeConnection();
                 // allow normal disposal to continue
             }
         });
@@ -403,7 +470,7 @@ public class ChessClientGUI {
 
         // --- WELCOME card ---
         JPanel welcome = new JPanel(new BorderLayout());
-        JLabel welcomeBg = loadBackgroundLabel(BACK_DIR + "/welcome.png", new Color(30,30,60));
+        JLabel welcomeBg = loadBackgroundLabel(BACK_DIR + "/welcome.jpg", new Color(30,30,60));
         welcome.add(welcomeBg, BorderLayout.CENTER);
         // server IP input + find button panel
         JPanel wc = new JPanel();
@@ -444,6 +511,8 @@ public class ChessClientGUI {
 
         // --- GAME card (board + right pane) ---
         JPanel gameCard = new JPanel(new BorderLayout());
+
+        // --- create square-preserving board panel + wrapper ---
         boardPanel = new JPanel(new GridLayout(8,8));
         for (int r=0;r<8;r++) for (int c=0;c<8;c++) {
             SquareLabel sq = new SquareLabel("", SwingConstants.CENTER);
@@ -455,6 +524,42 @@ public class ChessClientGUI {
             squares[r][c]=sq; boardPanel.add(sq);
         }
         initBoardModel(); updateBoardUI();
+
+        // wrapper that keeps the boardPanel square and centered
+        boardContainer = new JPanel(new GridBagLayout());
+        boardContainer.setOpaque(false);
+
+        // initial preferred size for the board (so it shows before first resize)
+        int initialBoardPx = SQUARE_SIZE * 8;
+        boardPanel.setPreferredSize(new Dimension(initialBoardPx, initialBoardPx));
+
+        // add boardPanel centered within boardContainer (GridBagLayout honors preferred size)
+        GridBagConstraints gbc = new GridBagConstraints();
+        gbc.gridx = 0; gbc.gridy = 0;
+        gbc.anchor = GridBagConstraints.CENTER;
+        gbc.fill = GridBagConstraints.NONE;
+        boardContainer.add(boardPanel, gbc);
+
+        // on resize, enforce a square preferred size (with padding) and revalidate
+        boardContainer.addComponentListener(new ComponentAdapter() {
+            @Override
+            public void componentResized(ComponentEvent e) {
+                int w = boardContainer.getWidth();
+                int h = boardContainer.getHeight();
+                // padding in pixels to leave some window margin; tweak as desired
+                int padding = 40;
+                int size = Math.min(w, h) - padding;
+                if (size < 40) size = 40; // minimum sensible size
+                // ensure dimension is multiple of 8 so cell sizes are integral
+                size = (size / 8) * 8;
+                boardPanel.setPreferredSize(new Dimension(size, size));
+                boardPanel.revalidate();
+                // clear icon cache for new size (avoid stale scaled icons)
+                iconCacheBySize.remove(size);
+                updateBoardUI();
+            }
+        });
+
         JPanel right = new JPanel(new BorderLayout());
         log = new JTextArea(10,20); log.setEditable(false);
         statusLabel = new JLabel("Not connected");
@@ -507,7 +612,8 @@ public class ChessClientGUI {
         right.add(topRight, BorderLayout.CENTER);
         right.add(bottomWrap, BorderLayout.SOUTH);
         gameCard.add(bottomWrap, BorderLayout.SOUTH);
-        gameCard.add(boardPanel, BorderLayout.CENTER); 
+        // add the board container (not raw boardPanel) so the board remains square
+        gameCard.add(boardContainer, BorderLayout.CENTER); 
         gameCard.add(right, BorderLayout.EAST);
 
         cards.add(welcome, CARD_WELCOME);
@@ -585,6 +691,14 @@ public class ChessClientGUI {
         Rectangle b = frame.getContentPane().getBounds();
         overlayPanel.setBounds(b);
         overlayColorPanel.setBounds(0,0,b.width,b.height);
+
+        // after frame visible, run a one-shot invokeLater to let layout compute and apply square sizing
+        SwingUtilities.invokeLater(() -> {
+            if (boardContainer != null) {
+                boardContainer.revalidate();
+                boardContainer.repaint();
+            }
+        });
     }
 
     private JLabel loadBackgroundLabel(String path, Color fallback) {
@@ -629,20 +743,7 @@ public class ChessClientGUI {
         if (readerThread != null) { readerThread.interrupt(); readerThread = null; }
     }
 
-    private void sendQuitAndClose() {
-        intentionalDisconnect = true;
-        try {
-            if (out != null) {
-                out.println("QUIT");
-                out.flush();
-            }
-        } catch (Exception ignored) {}
-        closeConnection();
-    }
-
-
     private void exitToWelcome() {
-        closeConnection();
         matchmakingTimeoutReceived = false;
 
         // Reset game state
@@ -1133,8 +1234,6 @@ public class ChessClientGUI {
             return;
         }
 
-        if (msg.startsWith("OK")) return;
-
         // fallback: just log unknown messages
         append("Unhandled server msg: " + msg);
     }
@@ -1259,17 +1358,20 @@ public class ChessClientGUI {
             pendingFrom = pendingTo = null;
 
         } catch (IOException e) {
-            // Only show error popup if this wasn't an intentional disconnect
-            if (!intentionalDisconnect) {
+            // If the user intentionally disconnected (or the game overlay was showing) don't show an error popup.
+            if (!intentionalDisconnect && !endOverlayShown) {
+                // For other unexpected network errors show the dialog.
                 e.printStackTrace();
                 append("Connection error: " + e.getMessage());
                 SwingUtilities.invokeLater(() -> {
-                    CardLayout cl = (CardLayout)cards.getLayout();
-                    cl.show(cards, CARD_WELCOME);
+                    try {
+                        CardLayout cl = (CardLayout)cards.getLayout();
+                        cl.show(cards, CARD_WELCOME);
+                    } catch (Exception ignored) {}
                     JOptionPane.showMessageDialog(frame, "Network error: " + e.getMessage(), "Connection error", JOptionPane.ERROR_MESSAGE);
                 });
             } else {
-                // Intentional disconnect - just log it quietly
+                // Expected/intentional disconnect (or game end overlay shown) — just log quietly.
                 append("Disconnected from server.");
             }
         } finally {
