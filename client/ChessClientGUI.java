@@ -453,15 +453,38 @@ public class ChessClientGUI {
         clientName = generateRandomName();
 
         frame = new JFrame("Chess Client");
-        // don't rely on EXIT_ON_CLOSE — do explicit cleanup so background threads/sockets are closed
-        frame.setDefaultCloseOperation(JFrame.DISPOSE_ON_CLOSE);
+        // Use DO_NOTHING so we can perform clean shutdown and then exit.
+        frame.setDefaultCloseOperation(JFrame.DO_NOTHING_ON_CLOSE);
         frame.addWindowListener(new java.awt.event.WindowAdapter() {
             @Override
             public void windowClosing(java.awt.event.WindowEvent e) {
-                // This runs on the EDT — close network resources cleanly
-                out.println("QUIT");
+                // Make closing idempotent (ignore repeated clicks)
+                if (intentionalDisconnect) return;
+                intentionalDisconnect = true;
+
+                // Best-effort: notify server if we have an open writer.
+                try {
+                    if (out != null) {
+                        out.println("QUIT");
+                        out.flush();
+                    } else if (socket != null && !socket.isClosed()) {
+                        // If we don't have a PrintWriter, try to shutdown socket output to wake server/threads.
+                        try { socket.shutdownOutput(); } catch (IOException ignored) {}
+                    }
+                } catch (Exception ignored) {
+                    // ignore any network errors during shutdown
+                }
+
+                // Close connection resources (safe if already closed)
                 closeConnection();
-                // allow normal disposal to continue
+
+                // Dispose UI and terminate JVM so no stray threads keep process alive.
+                // We run on EDT, so perform final disposal here and then exit.
+                SwingUtilities.invokeLater(() -> {
+                    try { frame.dispose(); } catch (Exception ignored) {}
+                    // forcing exit avoids cases where AWT/other threads keep the process alive.
+                    System.exit(0);
+                });
             }
         });
 
