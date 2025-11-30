@@ -1,6 +1,6 @@
 - test with InTCPtor
-- refine UI backgrounds/messages, remove "?" from popups
 - client/server ping + disconnection timeout if failed?
 - fragment code into separate files
+- add background behind board?
 
 - remove client logging box
