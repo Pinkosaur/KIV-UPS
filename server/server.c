@@ -210,7 +210,6 @@ static int is_square_attacked(GameState *g, int r, int c, int by_color) {
     return 0;
 }
 
-/* NOTE: now accepts the Match* so we can see en-passant & infer castling rights by piece positions */
 static int is_legal_move_basic(Match *m, int color, int r1, int c1, int r2, int c2) {
     GameState *g = &m->state;
     if (!in_bounds(r1,c1) || !in_bounds(r2,c2)) return 0;
