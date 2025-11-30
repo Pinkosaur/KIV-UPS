@@ -491,16 +491,68 @@ public class ChessClientGUI {
         // top-level layout: card layout center
         cards = new JPanel(new CardLayout());
 
-        // --- WELCOME card ---
+        // --- WELCOME card with large semi-transparent "WELCOME" text ---
         JPanel welcome = new JPanel(new BorderLayout());
+
+        /* background label (image or fallback color) */
         JLabel welcomeBg = loadBackgroundLabel(BACK_DIR + "/welcome.jpg", new Color(30,30,60));
-        welcome.add(welcomeBg, BorderLayout.CENTER);
-        // server IP input + find button panel
+
+        /* layered pane so we can put a custom transparent overlay on top of the background */
+        JLayeredPane welcomeLayer = new JLayeredPane();
+        welcomeLayer.setLayout(null); // we'll manage child bounds manually
+
+        /* put background in default layer */
+        welcomeBg.setBounds(0, 0, 1600, 800); // initial bounds; will be updated when shown/resized
+        welcomeLayer.add(welcomeBg, JLayeredPane.DEFAULT_LAYER);
+
+        /* overlay component that draws large centered semi-transparent "WELCOME" text.
+        Font size is computed dynamically from the component size so it scales nicely. */
+        JComponent welcomeTextOverlay = new JComponent() {
+            @Override
+            protected void paintComponent(Graphics g) {
+                super.paintComponent(g);
+                Graphics2D g2 = (Graphics2D) g.create();
+                try {
+                    g2.setRenderingHint(RenderingHints.KEY_TEXT_ANTIALIASING, RenderingHints.VALUE_TEXT_ANTIALIAS_ON);
+                    int w = getWidth(), h = getHeight();
+                    if (w <= 0 || h <= 0) return;
+                    String s = "WELCOME";
+                    // Font size ~ 1/5 of min dimension, clamped
+                    float fontSize = Math.max(24f, Math.min(w, h) / 5f);
+                    Font f = getFont().deriveFont(Font.BOLD, fontSize);
+                    g2.setFont(f);
+                    FontMetrics fm = g2.getFontMetrics();
+                    int tw = fm.stringWidth(s);
+                    int th = fm.getAscent();
+                    int x = (w - tw) / 2;
+                    int y = (h + th) / 2 - fm.getDescent();
+
+                    // draw soft shadow (subtle)
+                    g2.setColor(new Color(0, 0, 0, 100));
+                    g2.drawString(s, x + 3, y + 3);
+
+                    // draw semi-transparent white main text
+                    g2.setColor(new Color(255, 255, 255, 200)); // 200/255 alpha ~ 78% opaque
+                    g2.drawString(s, x, y);
+                } finally {
+                    g2.dispose();
+                }
+            }
+        };
+        welcomeTextOverlay.setOpaque(false);
+        welcomeTextOverlay.setBounds(0, 0, 800, 600);
+        welcomeLayer.add(welcomeTextOverlay, JLayeredPane.PALETTE_LAYER);
+
+        /* The welcomeLayer must resize its children when the parent is resized.
+        Put the layered pane into the welcome panel and update bounds on resize. */
+        welcome.add(welcomeLayer, BorderLayout.CENTER);
+
+        /* server IP input + find button panel (unchanged content) */
         JPanel wc = new JPanel();
         wc.setOpaque(false);
         wc.setLayout(new BoxLayout(wc, BoxLayout.Y_AXIS));
 
-        // name row
+        /* name row */
         JPanel nameRow = new JPanel(new FlowLayout(FlowLayout.CENTER, 8, 6));
         nameRow.setOpaque(false);
         nameRow.add(new JLabel("Your name:"));
@@ -508,7 +560,7 @@ public class ChessClientGUI {
         nameRow.add(nameField);
         wc.add(nameRow);
 
-        // server IP row
+        /* server IP row */
         JPanel ipRow = new JPanel(new FlowLayout(FlowLayout.CENTER, 8, 6));
         ipRow.setOpaque(false);
         ipRow.add(new JLabel("Server IP:"));
@@ -520,13 +572,70 @@ public class ChessClientGUI {
         findBtn.setAlignmentX(Component.CENTER_ALIGNMENT);
         wc.add(findBtn);
 
+        /* place wc at the bottom as before */
         welcome.add(wc, BorderLayout.SOUTH);
         findBtn.addActionListener(e -> onFindMatchClicked());
+
+        // ensure layered pane children fill the content area when resized,
+        welcome.addComponentListener(new ComponentAdapter() {
+            @Override
+            public void componentResized(ComponentEvent e) {
+                // total welcome panel size
+                int totalW = welcome.getWidth();
+                int totalH = welcome.getHeight();
+                if (totalW <= 0 || totalH <= 0) return;
+
+                // compute bottom controls height (wc). If layout has not happened yet,
+                // fall back to preferred size so we don't overlap the controls.
+                int bottomH = wc.getHeight();
+                if (bottomH <= 0) bottomH = wc.getPreferredSize().height;
+                if (bottomH < 0) bottomH = 0;
+
+                // available center area height
+                int centerH = totalH - bottomH;
+                if (centerH < 0) centerH = 0;
+
+                // set layered pane to cover only the center area
+                welcomeLayer.setBounds(0, 0, totalW, centerH);
+
+                // background and overlay should fill the layered pane
+                welcomeBg.setBounds(0, 0, totalW, centerH);
+                welcomeTextOverlay.setBounds(0, 0, totalW, centerH);
+
+                welcomeLayer.revalidate();
+                welcomeLayer.repaint();
+            }
+
+            @Override
+            public void componentShown(ComponentEvent e) {
+                // ensure initial sizing is correct when first shown
+                SwingUtilities.invokeLater(() -> {
+                    // same logic as above
+                    int totalW = welcome.getWidth();
+                    int totalH = welcome.getHeight();
+                    if (totalW <= 0 || totalH <= 0) return;
+
+                    int bottomH = wc.getHeight();
+                    if (bottomH <= 0) bottomH = wc.getPreferredSize().height;
+                    if (bottomH < 0) bottomH = 0;
+
+                    int centerH = totalH - bottomH;
+                    if (centerH < 0) centerH = 0;
+
+                    welcomeLayer.setBounds(0, 0, totalW, centerH);
+                    welcomeBg.setBounds(0, 0, totalW, centerH);
+                    welcomeTextOverlay.setBounds(0, 0, totalW, centerH);
+
+                    welcomeLayer.revalidate();
+                    welcomeLayer.repaint();
+                });
+            }
+        });
 
 
         // --- WAITING card ---
         JPanel waiting = new JPanel(new BorderLayout());
-        JLabel waitingBg = loadBackgroundLabel(BACK_DIR + "/waiting.png", new Color(40,40,40));
+        JLabel waitingBg = loadBackgroundLabel(BACK_DIR + "/waiting.gif", new Color(40,40,40));
         waiting.add(waitingBg, BorderLayout.CENTER);
         JLabel waitingLbl = new JLabel("Searching for opponent...", SwingConstants.CENTER);
         waitingLbl.setForeground(Color.WHITE);
@@ -727,11 +836,31 @@ public class ChessClientGUI {
     private JLabel loadBackgroundLabel(String path, Color fallback) {
         File f = new File(path);
         if (f.exists()) {
-            try { BufferedImage img = ImageIO.read(f); return new JLabel(new ImageIcon(img)); }
-            catch (IOException e) { }
+            String lower = path.toLowerCase();
+            try {
+                if (lower.endsWith(".gif")) {
+                    // Use ImageIcon directly for GIFs so Swing will animate them.
+                    // Prefer loading from an absolute path or resource URL.
+                    ImageIcon ico = new ImageIcon(path);
+                    JLabel lbl = new JLabel(ico);
+                    lbl.setHorizontalAlignment(SwingConstants.CENTER);
+                    lbl.setVerticalAlignment(SwingConstants.CENTER);
+                    return lbl;
+                } else {
+                    // Static images — keep using ImageIO for best quality
+                    BufferedImage img = ImageIO.read(f);
+                    return new JLabel(new ImageIcon(img));
+                }
+            } catch (IOException e) {
+                System.err.println("Failed to load background: " + path + " -> " + e.getMessage());
+            }
         }
-        JLabel p = new JLabel(); p.setOpaque(true); p.setBackground(fallback); return p;
+        JLabel p = new JLabel();
+        p.setOpaque(true);
+        p.setBackground(fallback);
+        return p;
     }
+
 
     private void onFindMatchClicked() {
         CardLayout cl = (CardLayout) cards.getLayout(); cl.show(cards, CARD_WAITING);
