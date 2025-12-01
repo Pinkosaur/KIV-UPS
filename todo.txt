@@ -1,6 +1,6 @@
 - test with InTCPtor
 - client/server ping + disconnection timeout if failed?
-- fragment code into separate files
 - add background behind board?
+- display opponent's name
 
 - remove client logging box
