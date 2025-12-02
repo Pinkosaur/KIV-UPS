@@ -17,7 +17,6 @@
   <properties>
     <maven.compiler.release>17</maven.compiler.release>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
-    <!-- compile output directory (matches your javac -d out ./*.java) -->
     <classes.output.dir>${project.basedir}/out</classes.output.dir>
   </properties>
 
