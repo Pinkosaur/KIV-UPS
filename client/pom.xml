@@ -1,0 +1,70 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0
+                             https://maven.apache.org/xsd/maven-4.0.0.xsd">
+
+  <modelVersion>4.0.0</modelVersion>
+
+  <groupId>com.example</groupId>
+  <artifactId>chess-client</artifactId>
+  <version>1.0.0</version>
+  <packaging>jar</packaging>
+
+  <name>Chess Client</name>
+  <description>Refactored ChessClientGUI and supporting classes</description>
+
+  <properties>
+    <maven.compiler.release>17</maven.compiler.release>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    <!-- compile output directory (matches your javac -d out ./*.java) -->
+    <classes.output.dir>${project.basedir}/out</classes.output.dir>
+  </properties>
+
+  <build>
+    <plugins>
+      <!-- Compiler plugin: compile to release level and write classes to ./out -->
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-compiler-plugin</artifactId>
+        <version>3.11.0</version>
+        <configuration>
+          <release>${maven.compiler.release}</release>
+          <outputDirectory>${classes.output.dir}</outputDirectory>
+        </configuration>
+      </plugin>
+
+      <!-- Jar plugin: set Main-Class in manifest for java -jar -->
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-jar-plugin</artifactId>
+        <version>3.4.0</version>
+        <configuration>
+          <archive>
+            <manifest>
+              <mainClass>ChessClientGUI</mainClass>
+              <addDefaultImplementationEntries>true</addDefaultImplementationEntries>
+            </manifest>
+          </archive>
+        </configuration>
+      </plugin>
+
+      <!-- Exec plugin: run the main class via `mvn exec:java` and include ./out -->
+      <plugin>
+        <groupId>org.codehaus.mojo</groupId>
+        <artifactId>exec-maven-plugin</artifactId>
+        <version>3.1.0</version>
+        <configuration>
+          <mainClass>ChessClientGUI</mainClass>
+          <classpathScope>runtime</classpathScope>
+          <addClasspath>true</addClasspath>
+          <additionalClasspathElements>
+            <additionalClasspathElement>${classes.output.dir}</additionalClasspathElement>
+          </additionalClasspathElements>
+        </configuration>
+      </plugin>
+    </plugins>
+  </build>
+
+  <dependencies/>
+</project>
