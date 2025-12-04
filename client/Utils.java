@@ -18,7 +18,7 @@ public final class Utils {
         "Builder","Artist","Nimbus"
     };
 
-    /** Return a random name like "CleverFox42" (0..99 suffix). Matches original behavior. */
+    /** Return a random name like "CleverFox42" (0..99 suffix). */
     public static String generateRandomName() {
         Random rnd = new Random();
         String adj = NAME_ADJECTIVES[rnd.nextInt(NAME_ADJECTIVES.length)];

@@ -31,15 +31,13 @@ public class ChessClientGUI {
     private static final String BACK_DIR = "backgrounds"; // placeholders
     private static final int SQUARE_SIZE = 64;
     private String clientName;
+    private String opponentName;
 
     private JTextField nameField;
 
     private volatile boolean matchmakingTimeoutReceived = false;
 
     private JFrame frame;
-    private JTextArea log;
-    private JTextField input;
-    private JButton sendBtn;
     private JLabel statusLabel;
 
     // networking abstraction
@@ -169,7 +167,7 @@ public class ChessClientGUI {
                     squares[uiR][uiC].setDrawCheckCircle(modelR == kingR && modelC == kingC && kingInCheck);
                 }
             }
-            if (statusLabel != null) statusLabel.setText("Color: " + (myColor==0?"WHITE":myColor==1?"BLACK":"?") + "   " + (myTurn?"Your turn":"Opponent"));
+            if (statusLabel != null) statusLabel.setText((myColor==0?"White":"Black") + ": " + clientName + " (you) VS " + (myColor==1?"White":"Black") + ": " + opponentName + "  -  " + (myTurn?"Your turn":"Opponent's turn"));
         });
     }
 
@@ -203,7 +201,7 @@ public class ChessClientGUI {
 
         // --- WELCOME card ---
         JPanel welcome = new JPanel(new BorderLayout());
-        JLabel welcomeBg = loadBackgroundLabel(BACK_DIR + "/welcome.jpg", new Color(30,30,60));
+        JLabel welcomeBg = loadBackgroundLabel(BACK_DIR + "/chessboardbg.jpg", new Color(30,30,60));
         JLayeredPane welcomeLayer = new JLayeredPane();
         welcomeLayer.setLayout(null);
         welcomeBg.setBounds(0,0,1600,800);
@@ -348,17 +346,17 @@ public class ChessClientGUI {
             }
         });
 
-        JPanel right = new JPanel(new BorderLayout());
-        log = new JTextArea(10,20); log.setEditable(false);
-        statusLabel = new JLabel("Not connected");
-        JPanel topRight = new JPanel(new BorderLayout()); topRight.add(statusLabel, BorderLayout.NORTH);
-        topRight.add(new JScrollPane(log), BorderLayout.CENTER);
+        // top status label
+        statusLabel = new JLabel("Not connected", SwingConstants.CENTER);
+        statusLabel.setOpaque(true);
+        statusLabel.setBackground(new Color(40, 40, 40));
+        statusLabel.setForeground(Color.WHITE);
+        statusLabel.setBorder(BorderFactory.createEmptyBorder(8, 12, 8, 12));
+        statusLabel.setFont(statusLabel.getFont().deriveFont(14f));
+        statusLabel.setVisible(false);
+        frame.getContentPane().add(statusLabel, BorderLayout.NORTH);
 
         JPanel bottom = new JPanel(new BorderLayout());
-        input = new JTextField();
-        sendBtn = new JButton("Send");
-        bottom.add(input, BorderLayout.CENTER);
-        bottom.add(sendBtn, BorderLayout.EAST);
 
         JPanel ctrl = new JPanel(new FlowLayout(FlowLayout.CENTER, 8, 0));
         resignBtn = new JButton("Resign");
@@ -392,12 +390,131 @@ public class ChessClientGUI {
         bottomWrap.add(ctrl, BorderLayout.SOUTH);
 
         cards = new JPanel(new CardLayout());
-        sendBtn.addActionListener(e -> sendInput()); input.addActionListener(e -> sendInput());
-        right.add(topRight, BorderLayout.CENTER);
-        right.add(bottomWrap, BorderLayout.SOUTH);
-        gameCard.add(bottomWrap, BorderLayout.SOUTH);
-        gameCard.add(boardContainer, BorderLayout.CENTER);
-        gameCard.add(right, BorderLayout.EAST);
+// --- GAME background layer (chessboardbg.jpg) + board container layered ---
+JComponent gameBg = new JComponent() {
+    private BufferedImage img = null;
+    private BufferedImage cachedScaled = null;
+    private int cachedW = -1, cachedH = -1;
+    {
+        File f = new File(BACK_DIR + "/chessboardbg.jpg");
+        if (f.exists()) {
+            try { img = ImageIO.read(f); } catch (IOException ex) { img = null; }
+        }
+    }
+    @Override
+    protected void paintComponent(Graphics g) {
+        super.paintComponent(g);
+        Graphics2D g2 = (Graphics2D) g.create();
+        try {
+            int w = getWidth(), h = getHeight();
+            if (w <= 0 || h <= 0) return;
+            if (img != null) {
+                // If cached scaled image does not match current size, recreate it.
+                if (w != cachedW || h != cachedH || cachedScaled == null) {
+                    // compute scale to COVER the area (scale = max(scaleX, scaleY))
+                    double scaleX = (double) w / img.getWidth();
+                    double scaleY = (double) h / img.getHeight();
+                    double scale = Math.max(scaleX, scaleY);
+
+                    int destW = (int) Math.round(img.getWidth() * scale);
+                    int destH = (int) Math.round(img.getHeight() * scale);
+
+                    // create a buffered image of the component size and draw the scaled image centered
+                    BufferedImage tmp = new BufferedImage(w, h, BufferedImage.TYPE_INT_ARGB);
+                    Graphics2D tg = tmp.createGraphics();
+                    try {
+                        tg.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BILINEAR);
+                        int x = (w - destW) / 2;
+                        int y = (h - destH) / 2;
+                        tg.drawImage(img, x, y, destW, destH, null);
+                    } finally {
+                        tg.dispose();
+                    }
+                    cachedScaled = tmp;
+                    cachedW = w; cachedH = h;
+                }
+                g2.drawImage(cachedScaled, 0, 0, null);
+            } else {
+                g2.setColor(new Color(30, 30, 30));
+                g2.fillRect(0, 0, w, h);
+            }
+        } finally {
+            g2.dispose();
+        }
+    }
+
+    @Override
+    public void invalidate() {
+        super.invalidate();
+        // clear cache when layout changes to force re-scale next paint
+        cachedScaled = null;
+        cachedW = cachedH = -1;
+    }
+};
+
+
+// layered pane to show background behind the centered boardContainer
+JLayeredPane gameLayer = new JLayeredPane();
+gameLayer.setLayout(null); // we'll manage bounds manually
+
+// add background at default layer
+gameBg.setBounds(0, 0, 800, 600); // initial bounds; will be updated by resize handler
+gameLayer.add(gameBg, JLayeredPane.DEFAULT_LAYER);
+
+// add boardContainer above background
+boardContainer.setBounds(0, 0, boardPanel.getPreferredSize().width, boardPanel.getPreferredSize().height);
+gameLayer.add(boardContainer, JLayeredPane.PALETTE_LAYER);
+
+// ensure layered pane fills the gameCard center area and children are resized/centered
+gameCard.addComponentListener(new ComponentAdapter() {
+    @Override
+    public void componentResized(ComponentEvent e) {
+        int totalW = gameCard.getWidth();
+        int totalH = gameCard.getHeight();
+        if (totalW <= 0 || totalH <= 0) return;
+
+        // set layered pane size to available center area (exclude bottom controls height)
+        // bottomWrap is placed separately below in SOUTH; for safety compute center area as gameCard center
+        int centerW = totalW;
+        int centerH = totalH;
+        gameLayer.setBounds(0, 0, centerW, centerH);
+
+        // background covers whole layered pane
+        gameBg.setBounds(0, 0, centerW, centerH);
+
+        // compute preferred board pixel size (reuse the same sizing logic as boardContainer)
+        int padding = 40;
+        int size = Math.min(centerW, centerH - bottomWrap.getHeight()) - padding;
+        if (size < 40) size = Math.min(centerW, centerH);
+        size = (size / 8) * 8;
+        if (size < 8) size = (Math.min(centerW, centerH) / 8) * 8;
+
+        // center the boardContainer inside the layered pane
+        int bx = Math.max(0, (centerW - size) / 2);
+        int by = Math.max(0, (centerH - size) / 2);
+        boardPanel.setPreferredSize(new Dimension(size, size));
+        boardContainer.setBounds(bx, by, size, size);
+
+        // clear icon cache for the new size and repaint
+        imageManager.clearCacheForSize(size);
+        boardContainer.revalidate();
+        gameLayer.revalidate();
+        gameLayer.repaint();
+    }
+
+    @Override
+    public void componentShown(ComponentEvent e) {
+        SwingUtilities.invokeLater(() -> {
+            componentResized(e);
+        });
+    }
+});
+
+// put layered pane in center of gameCard
+gameCard.add(gameLayer, BorderLayout.CENTER);
+// bottomWrap remains in SOUTH
+gameCard.add(bottomWrap, BorderLayout.SOUTH);
+
         cards.add(welcome, CARD_WELCOME);
         cards.add(waiting, CARD_WAITING);
         cards.add(gameCard, CARD_GAME);
@@ -421,7 +538,11 @@ public class ChessClientGUI {
             }
         });
 
-        frame.pack(); frame.setLocationRelativeTo(null); frame.setVisible(true);
+        frame.setPreferredSize(new Dimension(1100, 760));
+        frame.setMinimumSize(new Dimension(800, 600));
+        frame.pack();
+        frame.setLocationRelativeTo(null);
+        frame.setVisible(true);
         Rectangle b = frame.getContentPane().getBounds();
         resultOverlay.setBounds(b);
         resultOverlay.setInnerBounds(0,0,b.width,b.height);
@@ -458,6 +579,12 @@ public class ChessClientGUI {
         return p;
     }
 
+    /* small helper to escape a few HTML chars in player names to avoid label-breaking names */
+    private String escapeHtml(String s) {
+        if (s == null) return "";
+        return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;");
+    }
+
     private void onFindMatchClicked() {
         CardLayout cl = (CardLayout) cards.getLayout(); cl.show(cards, CARD_WAITING);
         if (serverIpField != null) {
@@ -468,7 +595,6 @@ public class ChessClientGUI {
             String n = nameField.getText().trim();
             if (!n.isEmpty()) clientName = n;
         }
-        log = (log == null) ? new JTextArea() : log;
         startConnection();
     }
 
@@ -557,6 +683,7 @@ public class ChessClientGUI {
         SwingUtilities.invokeLater(() -> {
             resultOverlay.hideOverlay();
             CardLayout cl = (CardLayout) cards.getLayout();
+            statusLabel.setVisible(false);
             cl.show(cards, CARD_WELCOME);
         });
         append("Returned to menu.");
@@ -706,19 +833,35 @@ public class ChessClientGUI {
                 append("Game started!");
                 String[] p = msg.split("\\s+");
                 String color = null;
-                if (p.length >= 3) color = p[p.length - 1];
-                else if (p.length == 2) color = p[1];
-                if (color != null && color.equalsIgnoreCase("white")) {
-                    myColor = 0; myTurn = true;
+                if (p.length >= 3) {
+                    // format: START <opponent> <white|black>
+                    opponentName = p[1];
+                    color = p[p.length - 1];
+                } else if (p.length == 2) {
+                    color = p[1];
+                    opponentName = "";
                 } else {
-                    myColor = 1; myTurn = false;
+                    opponentName = "";
+                }
+
+                if (color != null && color.equalsIgnoreCase("white")) {
+                    myColor = 0;
+                    myTurn = true;
+                } else {
+                    myColor = 1;
+                    myTurn = false;
                 }
                 initBoardModel();
                 updateBoardUI();
                 CardLayout cl = (CardLayout) cards.getLayout();
                 cl.show(cards, CARD_GAME);
+                statusLabel.setVisible(true);
+
+                // enable resign/draw now that game is active (buttons still exist logically, but are not shown)
                 if (resignBtn != null) resignBtn.setEnabled(true);
                 if (drawBtn != null) drawBtn.setEnabled(true);
+
+                // update the top status label
             });
             return;
         }
@@ -780,11 +923,6 @@ public class ChessClientGUI {
         if (msg.startsWith("RESIGN")) {
             append("You resigned");
             showEndOverlay(false, "You resigned");
-            return;
-        }
-        if (msg.startsWith("BYE")) {
-            append("Server closed connection");
-            showNeutralOverlay("Connection closed by server");
             return;
         }
         if (msg.startsWith("STALEMATE")) {
@@ -874,14 +1012,12 @@ public class ChessClientGUI {
     }
 
     private void append(String s) {
-        SwingUtilities.invokeLater(() -> {
-            if (log!=null) {
-                log.append(s + "\n");
-                log.setCaretPosition(log.getDocument().getLength());
-            } else System.out.println(s);
-        });
+        // Print logs to stdout instead of the in-game text area.
+        // Avoiding Swing EDT dispatch here — System.out.println is synchronized and safe from any thread.
+        System.out.println(s);
     }
 
+/*
     private void sendInput() {
         String txt = input.getText().trim();
         if (txt.isEmpty() || networkClient == null) return;
@@ -897,5 +1033,5 @@ public class ChessClientGUI {
         networkClient.sendRaw(txt);
         append(">> " + txt);
         input.setText("");
-    }
+    }*/
 }
