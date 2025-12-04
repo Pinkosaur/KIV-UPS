@@ -81,12 +81,6 @@ void match_release_after_client(Client *me) {
         }
     }
 
-    /* Wake the other thread (if blocked in recv) so it can run its cleanup */
-    if (other && other->sock > 0) {
-        /* shutdown wakes blocked recv() on the other side */
-        shutdown(other->sock, SHUT_RDWR);
-    }
-
     /* clear our match pointer (we do not free the Client here) */
     me->match = NULL;
 
@@ -99,17 +93,8 @@ void match_release_after_client(Client *me) {
         /* Both client threads reached cleanup. At this point both clients
            should have closed/marked their sockets; but for safety ensure sockets
            are shut/closed before freeing the match. */
-        if (m->white && m->white->sock > 0) {
-            shutdown(m->white->sock, SHUT_RDWR);
-            close(m->white->sock);
-            m->white->sock = -1;
-        }
-        if (m->black && m->black->sock > 0) {
-            shutdown(m->black->sock, SHUT_RDWR);
-            close(m->black->sock);
-            m->black->sock = -1;
-        }
-
+        close_sockets(m);
+        
         /* finally free match resources */
         match_free(m);
     }
@@ -182,12 +167,14 @@ void *match_watchdog(void *arg) {
             /* send messages if sockets exist and close them */
             if (inactive && inactive->sock > 0) {
                 send_line(inactive->sock, "TIMEOUT"); /* you timed out */
+                usleep(20000000);
                 shutdown(inactive->sock, SHUT_RDWR);
                 close(inactive->sock);
                 inactive->sock = -1;
             }
             if (winner && winner->sock > 0) {
                 send_line(winner->sock, "OPPONENT_TIMEOUT"); /* opponent timed out -> you win */
+                usleep(20000000);
                 shutdown(winner->sock, SHUT_RDWR);
                 close(winner->sock);
                 winner->sock = -1;

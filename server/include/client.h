@@ -13,7 +13,7 @@
 typedef struct Client {
     int sock;
     char name[64];
-    int color;
+    int color; /* 0 - white, 1 - black*/
     int paired;
     Match *match;
     char client_addr[64];
@@ -32,6 +32,7 @@ void send_line_client(Client *c, const char *msg);
 
 /* utility used by server & client */
 void match_close_and_notify(Match *m, Client *leaver, const char *reason_to_opponent);
+void close_sockets(Match *m);
 
 void trim_crlf(char *s);
 
