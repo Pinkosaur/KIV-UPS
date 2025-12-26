@@ -77,7 +77,7 @@ void match_release_after_client(Client *me) {
     if (!m->finished) {
         m->finished = 1;
         if (other && other->sock > 0) {
-            send_line(other->sock, "OPPONENT_QUIT");
+            send_line(other->sock, "OPP_EXT");
         }
     }
 
@@ -122,10 +122,10 @@ void notify_start(Match *m) {
     if (!m) return;
     /* to white: opponent name, your color */
     snprintf(buf, sizeof(buf), "START %s white", m->black->name);
-    send_line(m->white->sock, buf);
+    send_fmt_with_seq(m->white, buf);
     /* to black: opponent name, your color */
     snprintf(buf, sizeof(buf), "START %s black", m->white->name);
-    send_line(m->black->sock, buf);
+    send_fmt_with_seq(m->black, buf);
 }
 
 
@@ -166,19 +166,13 @@ void *match_watchdog(void *arg) {
 
             /* send messages if sockets exist and close them */
             if (inactive && inactive->sock > 0) {
-                send_line(inactive->sock, "TIMEOUT"); /* you timed out */
-                usleep(20000000);
-                shutdown(inactive->sock, SHUT_RDWR);
-                close(inactive->sock);
-                inactive->sock = -1;
+                send_fmt_with_seq(inactive, "TOUT"); /* you timed out */
             }
             if (winner && winner->sock > 0) {
-                send_line(winner->sock, "OPPONENT_TIMEOUT"); /* opponent timed out -> you win */
-                usleep(20000000);
-                shutdown(winner->sock, SHUT_RDWR);
-                close(winner->sock);
-                winner->sock = -1;
+                send_fmt_with_seq(winner, "OPP_TOUT"); /* opponent timed out -> you win */
             }
+            usleep(2000000);
+            close_sockets(m);
 
             pthread_mutex_unlock(&m->lock);
             break;
