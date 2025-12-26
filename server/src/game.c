@@ -3,6 +3,8 @@
 #include <string.h>
 #include "game.h"
 #include "match.h"
+#include "logging.h"
+
 
 void init_board(GameState *g) {
     Piece init[8][8] = {
@@ -377,6 +379,7 @@ int find_king(GameState *g, int color, int *rk, int *ck) {
             if (g->board[r][c] == k) { *rk = r; *ck = c; return 1; }
         }
     }
+    log_printf("CRITICAL ERROR: King for color %d not found on board!\n", color);
     return 0;
 }
 

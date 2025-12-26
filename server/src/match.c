@@ -1,48 +1,121 @@
+/* match.c */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 #include <pthread.h>
 #include <time.h>
-#include <sys/socket.h>
 #include "match.h"
 #include "client.h"
 #include "game.h"
+#include "logging.h"
 
-/* create a new match for two clients (waiting becomes white, newcomer black) */
-Match *match_create(Client *white, Client *black) {
+
+/* Extern globals from main.c */
+extern int max_rooms;
+
+/* Global Room Registry */
+static Match *global_room_list = NULL;
+static int next_room_id = 1;
+static int current_room_count = 0;
+static pthread_mutex_t room_registry_lock = PTHREAD_MUTEX_INITIALIZER;
+
+/* --- Room Registry Helpers --- */
+
+void register_room(Match *m) {
+    pthread_mutex_lock(&room_registry_lock);
+    m->id = next_room_id++;
+    m->next = global_room_list;
+    global_room_list = m;
+    current_room_count++;
+    pthread_mutex_unlock(&room_registry_lock);
+}
+
+void unregister_room(Match *m) {
+    pthread_mutex_lock(&room_registry_lock);
+    Match **curr = &global_room_list;
+    while (*curr) {
+        if (*curr == m) {
+            *curr = m->next;
+            current_room_count--;
+            break;
+        }
+        curr = &(*curr)->next;
+    }
+    pthread_mutex_unlock(&room_registry_lock);
+}
+
+Match *find_open_room(int id) {
+    pthread_mutex_lock(&room_registry_lock);
+    Match *curr = global_room_list;
+    while (curr) {
+        if (curr->id == id && curr->black == NULL && !curr->finished) {
+            pthread_mutex_unlock(&room_registry_lock);
+            return curr;
+        }
+        curr = curr->next;
+    }
+    pthread_mutex_unlock(&room_registry_lock);
+    return NULL;
+}
+
+char *get_room_list_str() {
+    pthread_mutex_lock(&room_registry_lock);
+    char *buf = malloc(4096);
+    if (!buf) { pthread_mutex_unlock(&room_registry_lock); return NULL; }
+    buf[0] = '\0';
+    
+    Match *curr = global_room_list;
+    int count = 0;
+    while (curr) {
+        if (curr->black == NULL && !curr->finished) {
+            char line[128];
+            snprintf(line, sizeof(line), "%d:%s ", curr->id, curr->white->name);
+            strcat(buf, line);
+            count++;
+        }
+        curr = curr->next;
+    }
+    if (count == 0) strcpy(buf, "EMPTY");
+    pthread_mutex_unlock(&room_registry_lock);
+    return buf;
+}
+
+/* match.c FIX */
+
+/* Create a new match (room) with ONE player initially. 
+   refs must be 1 so that if this player leaves, the match is freed. */
+Match *match_create(Client *white) {
+    /* (Check max_rooms limit here if implemented) */
+
     Match *m = calloc(1, sizeof(Match));
     if (!m) return NULL;
+    
     m->white = white;
-    m->black = black;
-    m->turn = 0; /* white to move first */
+    m->black = NULL; /* Waiting for opponent */
+    m->turn = 0; 
     pthread_mutex_init(&m->lock, NULL);
     m->moves = NULL;
     m->moves_count = 0;
-    m->moves_cap = 0;
-    m->finished = 0;   /* init finished flag */
+    m->finished = 0;   
     m->draw_offered_by = -1;
 
-    /* initial castling rights: both sides full rights */
-    m->w_can_kingside = 1;
-    m->w_can_queenside = 1;
-    m->b_can_kingside = 1;
-    m->b_can_queenside = 1;
+    m->w_can_kingside = 1; m->w_can_queenside = 1;
+    m->b_can_kingside = 1; m->b_can_queenside = 1;
+    m->ep_r = -1; m->ep_c = -1;
 
-    /* no en-passant target initially */
-    m->ep_r = -1;
-    m->ep_c = -1;
+    init_board(&m->state); 
 
-    init_board(&m->state); /* initialize game state */
-
-    /* initialization for inactivity detection */
-    m->last_move_time = time(NULL); /* turn (white) starts now */
+    m->last_move_time = time(NULL); 
     m->turn_timeout_seconds = TURN_TIMEOUT_SECONDS;
+    
+    /* FIX: Set refs to 1 (White only). Do NOT set to 2. */
+    m->refs = 1; 
 
-    /* initialize client cleanup refcount: two client threads (white & black) */
-    m->refs = 2;
+    /* Add to global registry (assumed implemented as register_room(m)) */
+    register_room(m);
 
-    /* start a detached watchdog thread for this match */
+    /* Start watchdog */
     pthread_t wt;
     if (pthread_create(&wt, NULL, match_watchdog, m) == 0) {
         pthread_detach(wt);
@@ -51,57 +124,61 @@ Match *match_create(Client *white, Client *black) {
     return m;
 }
 
+/* Join an existing match */
+int match_join(Match *m, Client *black) {
+    pthread_mutex_lock(&m->lock);
+    if (m->black != NULL || m->finished) {
+        pthread_mutex_unlock(&m->lock);
+        return -1; // Already full or finished
+    }
+    m->black = black;
+    
+    /* FIX: Increment refs for the new player */
+    m->refs++; 
+    
+    pthread_mutex_unlock(&m->lock);
+    return 0;
+}
 
-/* free match and move history */
 void match_free(Match *m) {
     if (!m) return;
+    unregister_room(m);
     for (size_t i = 0; i < m->moves_count; ++i) free(m->moves[i]);
     free(m->moves);
     pthread_mutex_destroy(&m->lock);
     free(m);
 }
 
-/* Called by a client thread during its cleanup path.
-   Ensures:
-   - notify / wake opponent so it will exit recv()
-   - decrement match->refs (under lock)
-   - free match only when both client threads have reached cleanup (refs==0)
-*/
 void match_release_after_client(Client *me) {
     if (!me || !me->match) return;
     Match *m = me->match;
     Client *other = (me == m->white) ? m->black : m->white;
 
-    /* First: mark finished and notify opponent (under lock) and wake recv() */
+    /* First: mark finished and notify opponent (under lock) */
     pthread_mutex_lock(&m->lock);
     if (!m->finished) {
         m->finished = 1;
+        /* Note: We do NOT close sockets here. We just notify. */
         if (other && other->sock > 0) {
+            /* Use sequence-safe send if possible, or raw send_line */
             send_line(other->sock, "OPP_EXT");
         }
     }
 
-    /* clear our match pointer (we do not free the Client here) */
+    /* clear our match pointer */
     me->match = NULL;
 
-    /* decrement refs under lock, remember whether we're the last */
+    /* decrement refs */
     m->refs--;
     int last = (m->refs <= 0);
     pthread_mutex_unlock(&m->lock);
 
     if (last) {
-        /* Both client threads reached cleanup. At this point both clients
-           should have closed/marked their sockets; but for safety ensure sockets
-           are shut/closed before freeing the match. */
-        close_sockets(m);
-        
-        /* finally free match resources */
+        /* Last user out frees the memory. Do NOT close sockets. */
         match_free(m);
     }
 }
 
-
-/* append move string to match history (caller should lock) */
 int match_append_move(Match *m, const char *mv) {
     if (!m || !mv) return -1;
     if (m->moves_count + 1 > m->moves_cap) {
@@ -115,21 +192,13 @@ int match_append_move(Match *m, const char *mv) {
     return 0;
 }
 
-
-/* send START messages to both clients indicating opponent and color */
 void notify_start(Match *m) {
-    char buf[128];
-    if (!m) return;
-    /* to white: opponent name, your color */
-    snprintf(buf, sizeof(buf), "START %s white", m->black->name);
-    send_fmt_with_seq(m->white, buf);
-    /* to black: opponent name, your color */
-    snprintf(buf, sizeof(buf), "START %s black", m->white->name);
-    send_fmt_with_seq(m->black, buf);
+    if (!m || !m->white || !m->black) return;
+    /* Use send_fmt_with_seq to maintain sequence numbers */
+    send_fmt_with_seq(m->white, "START %s white", m->black->name);
+    send_fmt_with_seq(m->black, "START %s black", m->white->name);
 }
 
-
-/* watchdog thread for a match: ends match if current player exceeds inactivity timeout */
 void *match_watchdog(void *arg) {
     Match *m = (Match *)arg;
     if (!m) return NULL;
@@ -138,11 +207,7 @@ void *match_watchdog(void *arg) {
         sleep(2); /* check every 2 seconds */
 
         pthread_mutex_lock(&m->lock);
-        if (m->refs <= 0) {
-            pthread_mutex_unlock(&m->lock);
-            break;
-        }
-        if (m->finished) {
+        if (m->refs <= 0 || m->finished) {
             pthread_mutex_unlock(&m->lock);
             break;
         }
@@ -152,27 +217,19 @@ void *match_watchdog(void *arg) {
         int timed_out = 0;
 
         if (last != 0 && timeout > 0 && (now - last) >= timeout) {
-            /* the player whose turn it is failed to act in time */
             timed_out = 1;
         }
 
         if (timed_out) {
-            /* Determine inactive (timed-out) and winner */
             Client *inactive = (m->turn == 0) ? m->white : m->black;
             Client *winner   = (m->turn == 0) ? m->black : m->white;
 
-            /* mark finished */
             m->finished = 1;
 
-            /* send messages if sockets exist and close them */
-            if (inactive && inactive->sock > 0) {
-                send_fmt_with_seq(inactive, "TOUT"); /* you timed out */
-            }
-            if (winner && winner->sock > 0) {
-                send_fmt_with_seq(winner, "OPP_TOUT"); /* opponent timed out -> you win */
-            }
-            usleep(2000000);
-            close_sockets(m);
+            if (inactive && inactive->sock > 0) send_line(inactive->sock, "TOUT");
+            if (winner && winner->sock > 0) send_line(winner->sock, "OPP_TOUT");
+            
+            /* Do NOT close sockets. Clients will receive TOUT, send LIST, and exit game loop. */
 
             pthread_mutex_unlock(&m->lock);
             break;
@@ -180,6 +237,5 @@ void *match_watchdog(void *arg) {
             pthread_mutex_unlock(&m->lock);
         }
     }
-
     return NULL;
 }

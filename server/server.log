@@ -1,0 +1,155 @@
+[2025-12-26 19:58:34] Local network interfaces (IPv4):
+[2025-12-26 19:58:34]   lo: 127.0.0.1
+[2025-12-26 19:58:34]   wlan0: 192.168.2.57
+[2025-12-26 19:58:34]   virbr0: 192.168.122.1
+[2025-12-26 19:58:34]   br-5921784bc357: 172.18.0.1
+[2025-12-26 19:58:34]   docker0: 172.17.0.1
+[2025-12-26 19:58:34] Server configuration:
+[2025-12-26 19:58:34]   bind IP       : 0.0.0.0
+[2025-12-26 19:58:34]   port          : 10001
+[2025-12-26 19:58:34]   max rooms     : unlimited
+[2025-12-26 19:58:34]   max players   : unlimited
+[2025-12-26 19:58:34] Server listening on 0.0.0.0:10001
+[2025-12-26 21:24:15] Local network interfaces (IPv4):
+[2025-12-26 21:24:15]   lo: 127.0.0.1
+[2025-12-26 21:24:15]   wlan0: 192.168.2.57
+[2025-12-26 21:24:15]   virbr0: 192.168.122.1
+[2025-12-26 21:24:15]   br-5921784bc357: 172.18.0.1
+[2025-12-26 21:24:15]   docker0: 172.17.0.1
+[2025-12-26 21:24:15] Server configuration:
+[2025-12-26 21:24:15]   bind IP       : 0.0.0.0
+[2025-12-26 21:24:15]   port          : 10001
+[2025-12-26 21:24:15]   max rooms     : unlimited
+[2025-12-26 21:24:15]   max players   : unlimited
+[2025-12-26 21:24:15] Server listening on 0.0.0.0:10001
+[2025-12-26 21:24:46] New connection: 127.0.0.1:43176
+[2025-12-26 21:24:46] SENT -> unknown : WELCOME ChessServer/000
+[2025-12-26 21:24:46] Client identified as: CleverNimbus17
+[2025-12-26 21:24:46] SENT -> CleverNimbus17 : LOBBY (CMD: LIST, NEW, JOIN <id>)/281
+[2025-12-26 21:24:46] SENT -> CleverNimbus17 : ROOMLIST EMPTY/283
+[2025-12-26 21:24:47] New connection: 127.0.0.1:35180
+[2025-12-26 21:24:47] SENT -> unknown : WELCOME ChessServer/000
+[2025-12-26 21:24:47] Client identified as: BrilliantMagician65
+[2025-12-26 21:24:47] SENT -> BrilliantMagician65 : LOBBY (CMD: LIST, NEW, JOIN <id>)/177
+[2025-12-26 21:24:48] SENT -> BrilliantMagician65 : ROOMLIST EMPTY/179
+[2025-12-26 21:24:53] Client exited.
+[2025-12-26 21:25:01] Client exited.
+[2025-12-26 21:27:06] New connection: 127.0.0.1:33122
+[2025-12-26 21:27:06] SENT -> unknown : WELCOME ChessServer/000
+[2025-12-26 21:27:06] Client identified as: BrilliantKnight92
+[2025-12-26 21:27:06] SENT -> BrilliantKnight92 : LOBBY (CMD: LIST, NEW, JOIN <id>)/016
+[2025-12-26 21:27:06] SENT -> BrilliantKnight92 : ROOMLIST EMPTY/018
+[2025-12-26 21:27:09] New connection: 127.0.0.1:41388
+[2025-12-26 21:27:09] SENT -> unknown : WELCOME ChessServer/000
+[2025-12-26 21:27:09] Client identified as: InterestingScholar36
+[2025-12-26 21:27:09] SENT -> InterestingScholar36 : LOBBY (CMD: LIST, NEW, JOIN <id>)/117
+[2025-12-26 21:27:09] SENT -> InterestingScholar36 : ROOMLIST EMPTY/119
+[2025-12-26 21:27:11] New connection: 127.0.0.1:41398
+[2025-12-26 21:27:11] SENT -> unknown : WELCOME ChessServer/000
+[2025-12-26 21:27:11] Client identified as: MerryNimbus38
+[2025-12-26 21:27:11] SENT -> MerryNimbus38 : LOBBY (CMD: LIST, NEW, JOIN <id>)/470
+[2025-12-26 21:27:11] SENT -> MerryNimbus38 : ROOMLIST EMPTY/472
+[2025-12-26 21:27:15] New connection: 127.0.0.1:41414
+[2025-12-26 21:27:15] SENT -> unknown : WELCOME ChessServer/000
+[2025-12-26 21:27:15] Client identified as: InterestingExplorer85
+[2025-12-26 21:27:15] SENT -> InterestingExplorer85 : LOBBY (CMD: LIST, NEW, JOIN <id>)/242
+[2025-12-26 21:27:15] SENT -> InterestingExplorer85 : ROOMLIST EMPTY/244
+[2025-12-26 21:27:22] SENT -> InterestingExplorer85 : WAITING Room 1/246
+[2025-12-26 21:27:24] SENT -> InterestingScholar36 : WAITING Room 2/121
+[2025-12-26 21:27:27] SENT -> BrilliantKnight92 : ROOMLIST 2:InterestingScholar36 1:InterestingExplorer85 /020
+[2025-12-26 21:27:37] SENT -> MerryNimbus38 : ROOMLIST 2:InterestingScholar36 1:InterestingExplorer85 /474
+[2025-12-26 21:27:41] SENT -> InterestingExplorer85 : START MerryNimbus38 white/247
+[2025-12-26 21:27:41] SENT -> MerryNimbus38 : START InterestingExplorer85 black/476
+[2025-12-26 21:27:44] SENT -> BrilliantKnight92 : ROOMLIST 2:InterestingScholar36 /022
+[2025-12-26 21:28:32] SENT -> BrilliantKnight92 : ROOMLIST 2:InterestingScholar36 /024
+[2025-12-26 21:28:33] SENT -> BrilliantKnight92 : ROOMLIST 2:InterestingScholar36 /026
+[2025-12-26 21:28:46] SENT -> InterestingExplorer85 : OK_MV/249
+[2025-12-26 21:28:46] SENT -> MerryNimbus38 : OPP_MV g1f3/477
+[2025-12-26 21:28:46] DEBUG: Check status: in_chk=0, has_mv=1
+[2025-12-26 21:28:57] SENT -> MerryNimbus38 : OK_MV/479
+[2025-12-26 21:28:57] SENT -> InterestingExplorer85 : OPP_MV f7f6/250
+[2025-12-26 21:28:57] DEBUG: Check status: in_chk=0, has_mv=1
+[2025-12-26 21:29:00] SENT -> InterestingExplorer85 : OK_MV/252
+[2025-12-26 21:29:00] SENT -> MerryNimbus38 : OPP_MV f3d4/480
+[2025-12-26 21:29:00] DEBUG: Check status: in_chk=0, has_mv=1
+[2025-12-26 21:29:03] SENT -> MerryNimbus38 : OK_MV/482
+[2025-12-26 21:29:03] SENT -> InterestingExplorer85 : OPP_MV g7g5/253
+[2025-12-26 21:29:03] DEBUG: Check status: in_chk=0, has_mv=1
+[2025-12-26 21:29:06] SENT -> InterestingExplorer85 : OK_MV/255
+[2025-12-26 21:29:06] SENT -> MerryNimbus38 : OPP_MV e2e3/483
+[2025-12-26 21:29:06] DEBUG: Check status: in_chk=0, has_mv=1
+[2025-12-26 21:29:08] SENT -> MerryNimbus38 : OK_MV/485
+[2025-12-26 21:29:08] SENT -> InterestingExplorer85 : OPP_MV a7a6/256
+[2025-12-26 21:29:08] DEBUG: Check status: in_chk=0, has_mv=1
+[2025-12-26 21:29:11] SENT -> InterestingExplorer85 : OK_MV/258
+[2025-12-26 21:29:11] SENT -> MerryNimbus38 : OPP_MV d1h5/486
+[2025-12-26 21:29:11] DEBUG: Check status: in_chk=1, has_mv=0
+[2025-12-26 21:29:11] SENT -> InterestingExplorer85 : WIN_CHKM/259
+[2025-12-26 21:29:11] SENT -> MerryNimbus38 : CHKM/487
+[2025-12-26 21:29:11] SENT -> InterestingExplorer85 : LOBBY (CMD: LIST, NEW, JOIN <id>)/260
+[2025-12-26 21:29:11] SENT -> InterestingExplorer85 : ROOMLIST 2:InterestingScholar36 /261
+[2025-12-26 21:29:11] SENT -> MerryNimbus38 : LOBBY (CMD: LIST, NEW, JOIN <id>)/489
+[2025-12-26 21:29:13] SENT -> InterestingExplorer85 : ROOMLIST 2:InterestingScholar36 /263
+[2025-12-26 21:29:17] SENT -> MerryNimbus38 : ROOMLIST 2:InterestingScholar36 /491
+[2025-12-26 21:29:21] SENT -> MerryNimbus38 : ROOMLIST 2:InterestingScholar36 /493
+[2025-12-26 21:29:22] SENT -> MerryNimbus38 : WAITING Room 3/495
+[2025-12-26 21:29:24] SENT -> InterestingExplorer85 : ROOMLIST 3:MerryNimbus38 2:InterestingScholar36 /265
+[2025-12-26 21:29:28] Client exited.
+[2025-12-26 21:30:24] SENT -> InterestingScholar36 : LOBBY (CMD: LIST, NEW, JOIN <id>)/122
+[2025-12-26 21:30:24] Client exited.
+[2025-12-26 21:30:24] SENT -> BrilliantKnight92 : ROOMLIST 3:MerryNimbus38 /028
+[2025-12-26 21:30:31] SENT -> BrilliantKnight92 : ROOMLIST 3:MerryNimbus38 /030
+[2025-12-26 21:30:31] SENT -> BrilliantKnight92 : ROOMLIST 3:MerryNimbus38 /032
+[2025-12-26 21:30:31] SENT -> BrilliantKnight92 : ROOMLIST 3:MerryNimbus38 /034
+[2025-12-26 21:32:22] SENT -> MerryNimbus38 : LOBBY (CMD: LIST, NEW, JOIN <id>)/496
+[2025-12-26 21:32:22] SENT -> MerryNimbus38 : ROOMLIST EMPTY/497
+[2025-12-26 21:37:21] SENT -> MerryNimbus38 : ROOMLIST EMPTY/499
+[2025-12-26 21:37:25] Client exited.
+[2025-12-26 21:37:27] Client exited.
+[2025-12-26 21:49:28] New connection: 127.0.0.1:46462
+[2025-12-26 21:49:28] SENT -> unknown : WELCOME ChessServer/000
+[2025-12-26 21:49:28] Client identified as: BoldScholar27
+[2025-12-26 21:49:28] SENT -> BoldScholar27 : LOBBY (CMD: LIST, NEW, JOIN <id>)/393
+[2025-12-26 21:49:28] SENT -> BoldScholar27 : ROOMLIST EMPTY/395
+[2025-12-26 21:49:30] New connection: 127.0.0.1:46470
+[2025-12-26 21:49:30] SENT -> unknown : WELCOME ChessServer/000
+[2025-12-26 21:49:30] Client identified as: MerryNimbus79
+[2025-12-26 21:49:30] SENT -> MerryNimbus79 : LOBBY (CMD: LIST, NEW, JOIN <id>)/285
+[2025-12-26 21:49:30] SENT -> MerryNimbus79 : ROOMLIST EMPTY/287
+[2025-12-26 21:49:32] SENT -> BoldScholar27 : WAITING Room 4/397
+[2025-12-26 21:49:49] SENT -> MerryNimbus79 : ROOMLIST 4:BoldScholar27 /289
+[2025-12-26 21:49:50] SENT -> MerryNimbus79 : ROOMLIST 4:BoldScholar27 /291
+[2025-12-26 21:49:55] SENT -> MerryNimbus79 : ROOMLIST 4:BoldScholar27 /293
+[2025-12-26 21:49:55] SENT -> MerryNimbus79 : ROOMLIST 4:BoldScholar27 /295
+[2025-12-26 21:49:55] SENT -> MerryNimbus79 : ROOMLIST 4:BoldScholar27 /297
+[2025-12-26 21:49:59] SENT -> MerryNimbus79 : ROOMLIST 4:BoldScholar27 /299
+[2025-12-26 21:50:02] SENT -> BoldScholar27 : START MerryNimbus79 white/398
+[2025-12-26 21:50:02] SENT -> MerryNimbus79 : START BoldScholar27 black/301
+[2025-12-26 21:50:02] SENT -> MerryNimbus79 : OPP_EXT/302
+[2025-12-26 21:50:02] SENT -> BoldScholar27 : LOBBY (CMD: LIST, NEW, JOIN <id>)/400
+[2025-12-26 21:50:02] SENT -> BoldScholar27 : ROOMLIST EMPTY/402
+[2025-12-26 21:50:02] SENT -> MerryNimbus79 : LOBBY (CMD: LIST, NEW, JOIN <id>)/304
+[2025-12-26 21:50:03] SENT -> MerryNimbus79 : ROOMLIST EMPTY/306
+[2025-12-26 21:50:05] SENT -> BoldScholar27 : WAITING Room 5/404
+[2025-12-26 21:50:07] SENT -> MerryNimbus79 : ROOMLIST 5:BoldScholar27 /308
+[2025-12-26 21:50:16] SENT -> MerryNimbus79 : ROOMLIST 5:BoldScholar27 /310
+[2025-12-26 21:50:19] SENT -> BoldScholar27 : START MerryNimbus79 white/405
+[2025-12-26 21:50:19] SENT -> MerryNimbus79 : START BoldScholar27 black/312
+[2025-12-26 21:50:19] SENT -> MerryNimbus79 : OPP_EXT/313
+[2025-12-26 21:50:19] SENT -> BoldScholar27 : LOBBY (CMD: LIST, NEW, JOIN <id>)/407
+[2025-12-26 21:50:19] SENT -> MerryNimbus79 : LOBBY (CMD: LIST, NEW, JOIN <id>)/315
+[2025-12-26 21:50:19] SENT -> BoldScholar27 : ROOMLIST EMPTY/409
+[2025-12-26 21:50:20] SENT -> MerryNimbus79 : ROOMLIST EMPTY/317
+[2025-12-26 21:50:23] SENT -> BoldScholar27 : WAITING Room 6/411
+[2025-12-26 21:50:34] New connection: 127.0.0.1:50454
+[2025-12-26 21:50:34] SENT -> unknown : WELCOME ChessServer/000
+[2025-12-26 21:50:34] Client identified as: CleverWanderer21
+[2025-12-26 21:50:34] SENT -> CleverWanderer21 : LOBBY (CMD: LIST, NEW, JOIN <id>)/380
+[2025-12-26 21:50:34] SENT -> CleverWanderer21 : ROOMLIST 6:BoldScholar27 /382
+[2025-12-26 21:50:41] SENT -> MerryNimbus79 : WAITING Room 7/319
+[2025-12-26 21:50:43] SENT -> CleverWanderer21 : ROOMLIST 7:MerryNimbus79 6:BoldScholar27 /384
+[2025-12-26 21:50:44] SENT -> CleverWanderer21 : ROOMLIST 7:MerryNimbus79 6:BoldScholar27 /386
+[2025-12-26 21:50:48] SENT -> CleverWanderer21 : ROOMLIST 7:MerryNimbus79 6:BoldScholar27 /388
+[2025-12-26 21:50:49] SENT -> CleverWanderer21 : ROOMLIST 7:MerryNimbus79 6:BoldScholar27 /390
+[2025-12-26 21:50:50] SENT -> CleverWanderer21 : ROOMLIST 7:MerryNimbus79 6:BoldScholar27 /392
+[2025-12-26 21:50:50] Client exited.
