@@ -1,6 +1,8 @@
+- recovery after disconnection
+- client handling of connection lost
+- fix match timeout defeat during matchmaking
 - test with InTCPtor
-- client/server ping + disconnection timeout if failed?
-- add background behind board?
-- display opponent's name
+- test unplug RJ45
 
-- remove client logging box
+● obě aplikace ošetřují nevalidní síťové zprávy; protistranu odpojí při chybě
+o náhodná data nevyhovující protokolu (např. z /dev/urandom)
