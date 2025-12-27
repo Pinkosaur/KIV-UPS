@@ -185,7 +185,7 @@ void *client_worker(void *arg) {
                     else if (strncmp(linebuf, "JOIN ", 5) == 0) {
                         int id = atoi(linebuf + 5);
                         Match *m = find_open_room(id);
-                        if (!m) send_error(me, "Room not found/full");
+                        if (!m) send_error(me, "Room full or closed");
                         else {
                             if (match_join(m, me) == 0) {
                                 me->match = m; me->color = 1; me->paired = 1; 
@@ -202,11 +202,30 @@ void *client_worker(void *arg) {
         /* --- WAIT LOOP --- */
         if (me->color == 0 && me->match) {
             while (!me->paired) {
-                char tmp;
-                ssize_t pr = recv(me->sock, &tmp, 1, MSG_PEEK | MSG_DONTWAIT);
-                if (pr == 0) goto disconnect;
-                usleep(200000); 
-                if (me->match->finished) break;
+                char buf[256];
+                /* Use non-blocking read to check for commands (like EXT to cancel) */
+                ssize_t r = recv(me->sock, buf, sizeof(buf)-1, MSG_DONTWAIT);
+                
+                if (r > 0) {
+                    buf[r] = '\0';
+                    /* Check for EXT command to cancel hosting */
+                    if (strstr(buf, "EXT")) {
+                        log_printf("Client %s canceled hosting.\n", me->name);
+                        /* Release match -> unregisters room -> prevents ghost joins */
+                        match_release_after_client(me); 
+                        break; /* Exit wait loop; the check below will return us to LOBBY */
+                    }
+                } else if (r == 0) {
+                    goto disconnect; /* Connection closed */
+                } else {
+                    /* No data (EAGAIN) or error */
+                    if (errno != EAGAIN && errno != EWOULDBLOCK) goto disconnect;
+                }
+
+                /* Check if match was finished externally (e.g. timeout) */
+                if (me->match && me->match->finished) break;
+                
+                usleep(100000); 
             }
         }
 

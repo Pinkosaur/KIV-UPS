@@ -11,10 +11,10 @@ import java.util.HashSet;
 import java.util.Set;
 
 /**
- * ChessClientGUI with Requested Fixes:
- * 1. Waiting Screen: Replaced fast GIF with a controllable custom animation (WaitingPanel).
- * 2. Cancel Button: Added to waiting screen to return to Lobby.
- * 3. Aggressive Exit: Window 'X' now closes the app immediately, preventing hangs.
+ * ChessClientGUI with Ghost Room Fixes:
+ * 1. Cancel Button: Now disconnects socket to force server room deletion, then reconnects.
+ * 2. Exit Logic: Synchronous close to ensure server sees EOF.
+ * 3. Disconnect Logic: Suppressed "Connection Lost" alerts during intentional cancel/reconnect.
  */
 public class ChessClientGUI {
     private String serverHost = "127.0.0.1";
@@ -36,7 +36,7 @@ public class ChessClientGUI {
     private volatile boolean gameEnded = false;
     private volatile boolean intentionalDisconnect = false;
     
-    // UI State for "Deferred Transition"
+    // UI State
     private volatile boolean endOverlayShown = false;
     private volatile boolean pendingLobbyReturn = false;
 
@@ -59,7 +59,6 @@ public class ChessClientGUI {
     private JButton btnCreateRoom;
     private JButton btnRefreshRooms;
 
-    // Waiting Panel Reference (to stop animation)
     private WaitingPanel waitingPanel;
 
     // Game
@@ -73,10 +72,9 @@ public class ChessClientGUI {
     private final BoardModel boardModel = new BoardModel();
     private char[][] board = boardModel.board;
     private final ImageManager imageManager;
-    private int myColor = -1; // 0 white, 1 black
+    private int myColor = -1; 
     private boolean myTurn = false;
     
-    // Move State
     private int selR = -1, selC = -1;
     private Set<Point> highlighted = new HashSet<>();
     private volatile String pendingFrom = null, pendingTo = null;
@@ -153,24 +151,13 @@ public class ChessClientGUI {
         clientName = Utils.generateRandomName();
 
         frame = new JFrame("Chess Client");
-        // Use DO_NOTHING so we can handle the closing aggressively in the listener
         frame.setDefaultCloseOperation(JFrame.DO_NOTHING_ON_CLOSE);
         
-        // --- FIX #3: Aggressive Window Closing ---
+        // --- Aggressive Window Closing ---
         frame.addWindowListener(new WindowAdapter() {
             @Override
             public void windowClosing(WindowEvent e) {
-                intentionalDisconnect = true;
-                // Launch a thread to *try* to be polite, but don't wait for it
-                new Thread(() -> {
-                    if (networkClient != null) {
-                        try { networkClient.sendRaw("EXT"); networkClient.closeConnection(); } catch(Exception ignore){}
-                    }
-                }).start();
-                
-                // Close immediately - prevents hanging if network is stuck
-                frame.dispose();
-                System.exit(0);
+                handleDisconnectAndExit();
             }
         });
 
@@ -178,7 +165,6 @@ public class ChessClientGUI {
         cards.add(createWelcomePanel(), CARD_WELCOME);
         cards.add(createLobbyPanel(), CARD_LOBBY);
         
-        // --- FIX #1: Use custom waiting panel instead of GIF ---
         waitingPanel = createWaitingPanel();
         cards.add(waitingPanel, CARD_WAITING);
         
@@ -309,7 +295,7 @@ public class ChessClientGUI {
         return lobby;
     }
 
-    // --- FIX #1: Custom Waiting Panel Class ---
+    // --- Waiting Panel (Cancel Fix) ---
     private static class WaitingPanel extends JPanel {
         private final Timer timer;
         private int angle = 0;
@@ -324,7 +310,6 @@ public class ChessClientGUI {
             lbl.setFont(new Font("SansSerif", Font.BOLD, 18));
             add(lbl, BorderLayout.NORTH);
             
-            // --- FIX #2: Cancel Button ---
             JPanel bottom = new JPanel(new FlowLayout(FlowLayout.CENTER));
             bottom.setOpaque(false);
             cancelBtn = new JButton("Cancel");
@@ -332,7 +317,6 @@ public class ChessClientGUI {
             bottom.add(cancelBtn);
             add(bottom, BorderLayout.SOUTH);
 
-            // Animation Timer (50ms = 20fps, much smoother/slower than default GIF)
             timer = new Timer(50, e -> {
                 angle = (angle + 5) % 360;
                 repaint();
@@ -347,31 +331,30 @@ public class ChessClientGUI {
             super.paintComponent(g);
             Graphics2D g2 = (Graphics2D) g;
             g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
-            
-            // Draw a spinning loading arc in center
             int cx = getWidth() / 2;
             int cy = getHeight() / 2;
             int r = 30;
-            
             g2.setColor(new Color(100,100,100));
             g2.setStroke(new BasicStroke(4));
             g2.drawOval(cx-r, cy-r, r*2, r*2);
-            
             g2.setColor(Color.WHITE);
             g2.drawArc(cx-r, cy-r, r*2, r*2, -angle, 120);
         }
     }
 
     private WaitingPanel createWaitingPanel() {
-        // --- FIX #2 Implementation: Cancel Action ---
+        // Pass an action listener to the WaitingPanel for the "Cancel" button
         return new WaitingPanel(e -> {
             if (networkClient != null) {
-                // Send "EXT" to leave the room/queue on server
+                // 1. Send EXT to tell server to destroy the hosted room
                 networkClient.sendRaw("EXT"); 
-                // Return to lobby
-                ((CardLayout)cards.getLayout()).show(cards, CARD_LOBBY);
+                
+                // 2. Stop animation and switch UI back to Lobby
                 if (waitingPanel != null) waitingPanel.stopAnimation();
+                ((CardLayout)cards.getLayout()).show(cards, CARD_LOBBY);
                 statusLabel.setText("Connected as " + clientName);
+                
+                // 3. Refresh room list so we don't see our own ghost
                 networkClient.sendRaw("LIST");
             }
         });
@@ -440,14 +423,29 @@ public class ChessClientGUI {
 
     private void handleDisconnectAndExit() {
         intentionalDisconnect = true;
-        // Same aggressive exit logic as window listener
+        
+        // 1. Visually indicate shutdown (optional, but good practice)
+        frame.setVisible(false); 
+        frame.dispose();
+
+        // 2. Start a safety timer: Force kill app in 500ms no matter what.
+        // This guarantees the app never "freezes" or stays open if network hangs.
+        new javax.swing.Timer(500, e -> System.exit(0)).start();
+
+        // 3. Perform network cleanup in background
         new Thread(() -> {
             if (networkClient != null) {
-                try { networkClient.sendRaw("EXT"); networkClient.closeConnection(); } catch(Exception ignore){}
+                try {
+                    // Send disconnect command
+                    networkClient.sendRaw("EXT"); 
+                    // Give the socket a moment to flush the data to the OS
+                    Thread.sleep(100); 
+                    networkClient.closeConnection();
+                } catch (Exception ignored) {}
             }
+            // Exit immediately once cleanup is done (cancels out the 500ms wait)
+            System.exit(0);
         }).start();
-        frame.dispose();
-        System.exit(0);
     }
 
     private void onConnectClicked() {
@@ -490,14 +488,18 @@ public class ChessClientGUI {
 
     private void startConnection() {
         if (networkClient != null) networkClient.closeConnection();
+        // Reset flag; we are starting a fresh desired connection.
         intentionalDisconnect = false;
 
         networkClient = new NetworkClient(new NetworkClient.NetworkListener() {
             @Override public void onConnected() { System.out.println("Connected."); }
             @Override public void onDisconnected() {
                 SwingUtilities.invokeLater(() -> {
-                    if (!intentionalDisconnect) JOptionPane.showMessageDialog(frame, "Connection Lost", "Error", JOptionPane.ERROR_MESSAGE);
-                    exitToWelcome();
+                    // Only return to Welcome screen if it wasn't an intentional cancel/reconnect
+                    if (!intentionalDisconnect) {
+                        JOptionPane.showMessageDialog(frame, "Connection Lost", "Error", JOptionPane.ERROR_MESSAGE);
+                        exitToWelcome();
+                    }
                 });
             }
             @Override public void onServerMessage(String line, int seq) { parseServerMessageWithSeq(line, seq); }
@@ -607,7 +609,9 @@ public class ChessClientGUI {
             return;
         }
         if (u.startsWith("ERR") || u.equals("04")) {
-            SwingUtilities.invokeLater(() -> JOptionPane.showMessageDialog(frame, "Server Error: " + u));
+            // Remove "ERR " prefix if present (length 4) to show only the reason
+            String u2 = u.startsWith("ERR ") ? u.substring(4) : u;
+            SwingUtilities.invokeLater(() -> JOptionPane.showMessageDialog(frame, "Server Error: " + u2));
             waitingForOk = false;
             return;
         }
