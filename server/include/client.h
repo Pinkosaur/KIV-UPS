@@ -6,8 +6,7 @@
 #include "match.h"
 
 #define BUF_SZ 1024
-#define LINEBUF_SZ 4076
-#define MATCHMAKING_TIMEOUT_SECONDS 10
+#define LINEBUF_SZ 64
 
 /* Acknowledgement messages */
 #define MM_TOUT_ACK "01"
@@ -35,6 +34,7 @@
 #define DRW_DEC_ACK "21"
 #define DRW_ACC_ACK "22"
 #define RES_ACK_CS "23"
+#define RESUME_ACK "26"
 
 
 /* Client struct */
@@ -49,6 +49,7 @@ typedef struct Client {
     char server_ip[INET_ADDRSTRLEN];
     int seq;
     pthread_mutex_t lock;
+    time_t disconnect_time;
 } Client;
 
 /* client thread entry */

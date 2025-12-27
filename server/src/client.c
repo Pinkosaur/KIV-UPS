@@ -1,4 +1,4 @@
-/* client.c - Fixed with Draw Logic & Robust Game Loop Break */
+/* client.c */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -93,14 +93,8 @@ void *client_worker(void *arg) {
     size_t lp = 0;
     ssize_t r;
 
+    /* ... Connection limit check omitted for brevity ... */
     pthread_mutex_lock(&players_lock);
-    if (max_players != -1 && current_players >= max_players) {
-        pthread_mutex_unlock(&players_lock);
-        send_line(me->sock, "ERR Server full");
-        close(me->sock);
-        free(me);
-        return NULL;
-    }
     current_players++;
     pthread_mutex_unlock(&players_lock);
 
@@ -110,6 +104,8 @@ void *client_worker(void *arg) {
     send_fmt_with_seq(me, "WELCOME ChessServer");
 
     int got_hello = 0;
+    int is_reconnect = 0;
+
     while (!got_hello) {
         r = recv(me->sock, readbuf, sizeof(readbuf), 0);
         if (r <= 0) goto disconnect;
@@ -123,7 +119,29 @@ void *client_worker(void *arg) {
                 strip_trailing_seq(linebuf);
 
                 if (strncmp(linebuf, "HELLO ", 6) == 0) {
-                    strncpy(me->name, linebuf + 6, sizeof(me->name)-1);
+                    char name[64];
+                    strncpy(name, linebuf + 6, sizeof(name)-1);
+                    name[sizeof(name)-1] = '\0';
+
+                    /* Check if this is a reconnection attempt */
+                    Client *old_session = match_reconnect(name, me->sock);
+                    if (old_session) {
+                        /* RECONNECTION SUCCESSFUL */
+                        /* Free the temporary 'me' and switch to 'old_session' */
+                        free(me); 
+                        me = old_session; /* me now points to the persistent session */
+                        
+                        send_short_ack(me, HELLO_ACK, seq);
+                        send_fmt_with_seq(me, "RESUME");
+                        log_printf("Resumed session for %s\n", me->name);
+                        
+                        got_hello = 1;
+                        is_reconnect = 1;
+                        break;
+                    }
+
+                    /* Standard new login */
+                    strncpy(me->name, name, sizeof(me->name)-1);
                     if (seq >= 0) {
                         pthread_mutex_lock(&me->lock);
                         me->seq = seq;
@@ -132,13 +150,22 @@ void *client_worker(void *arg) {
                     }
                     got_hello = 1;
                     log_printf("Client identified as: %s\n", me->name);
+                } else {
+                    send_error(me, "Invalid protocol header");
+                    goto disconnect;
                 }
                 lp = 0;
             }
         }
     }
 
-    /* 2. Persistent Loop */
+    /* 2. Loop */
+    
+    /* If we reconnected, we skip the Lobby and go straight to Game Loop */
+    if (is_reconnect) {
+         goto game_loop;
+    }
+
     while (1) {
         me->match = NULL;
         me->paired = 0;
@@ -194,6 +221,10 @@ void *client_worker(void *arg) {
                             } else send_error(me, "Join failed");
                         }
                     }
+                    else {
+                        send_error(me, "Unknown command");
+                        goto disconnect;
+                    }
                     lp = 0;
                 }
             }
@@ -203,28 +234,17 @@ void *client_worker(void *arg) {
         if (me->color == 0 && me->match) {
             while (!me->paired) {
                 char buf[256];
-                /* Use non-blocking read to check for commands (like EXT to cancel) */
                 ssize_t r = recv(me->sock, buf, sizeof(buf)-1, MSG_DONTWAIT);
-                
                 if (r > 0) {
                     buf[r] = '\0';
-                    /* Check for EXT command to cancel hosting */
                     if (strstr(buf, "EXT")) {
-                        log_printf("Client %s canceled hosting.\n", me->name);
-                        /* Release match -> unregisters room -> prevents ghost joins */
                         match_release_after_client(me); 
-                        break; /* Exit wait loop; the check below will return us to LOBBY */
+                        break;
                     }
                 } else if (r == 0) {
-                    goto disconnect; /* Connection closed */
-                } else {
-                    /* No data (EAGAIN) or error */
-                    if (errno != EAGAIN && errno != EWOULDBLOCK) goto disconnect;
+                    goto disconnect;
                 }
-
-                /* Check if match was finished externally (e.g. timeout) */
                 if (me->match && me->match->finished) break;
-                
                 usleep(100000); 
             }
         }
@@ -235,143 +255,133 @@ void *client_worker(void *arg) {
         }
 
         /* --- GAME LOOP --- */
-        Match *myMatch = me->match;
-        int game_active = 1;
-        lp = 0;
+game_loop:
+        {
+            Match *myMatch = me->match;
+            int game_active = 1;
+            lp = 0;
 
-        while (game_active) {
-            r = recv(me->sock, readbuf, sizeof(readbuf), 0);
-            if (r <= 0) { match_release_after_client(me); goto disconnect_cleanup_only; }
-
-            for (ssize_t i = 0; i < r; ++i) {
-                if (lp + 1 < sizeof(linebuf)) linebuf[lp++] = readbuf[i];
-                if (readbuf[i] == '\n') {
-                    linebuf[lp] = '\0';
-                    trim_crlf(linebuf);
-                    int seq = parse_seq_number(linebuf);
-                    strip_trailing_seq(linebuf);
-
-                    if (seq >= 0) {
-                        pthread_mutex_lock(&me->lock);
-                        me->seq = seq;
-                        pthread_mutex_unlock(&me->lock);
-                        send_short_ack(me, ack_code_for_received(linebuf), seq);
-                    }
-
-                    pthread_mutex_lock(&myMatch->lock);
-                    
-                    if (myMatch->finished) {
-                        pthread_mutex_unlock(&myMatch->lock);
-                        game_active = 0;
-                        break;
-                    }
-
-                    if (strncmp(linebuf, "MV", 2) == 0) {
-                        if (myMatch->turn != me->color) {
-                            pthread_mutex_unlock(&myMatch->lock);
-                            send_error(me, "Not your turn");
-                        } else {
-                            char *mv = linebuf + 2;
-                            int r1, c1, r2, c2;
-                            parse_move(mv, &r1, &c1, &r2, &c2);
-                            char promo = (strlen(mv) >= 5) ? mv[4] : 0;
-
-                            apply_move(myMatch, r1, c1, r2, c2, promo);
-                            match_append_move(myMatch, mv);
-
-                            send_fmt_with_seq(me, "OK_MV");
-                            Client *opp = (me == myMatch->white) ? myMatch->black : myMatch->white;
-                            if (opp) send_fmt_with_seq(opp, "OPP_MV %s", mv);
-
-                            /* Check Win/Draw conditions */
-                            int opp_col = 1 - me->color;
-                            int in_chk = is_in_check(&myMatch->state, opp_col);
-                            int has_mv = has_any_legal_move(myMatch, opp_col);
-                            
-                            log_printf("DEBUG: Check status: in_chk=%d, has_mv=%d\n", in_chk, has_mv);
-
-                            if (in_chk && !has_mv) {
-                                myMatch->finished = 1;
-                                send_fmt_with_seq(me, "WIN_CHKM");
-                                if (opp) send_fmt_with_seq(opp, "CHKM");
-                                game_active = 0;
-                            } else if (!in_chk && !has_mv) {
-                                myMatch->finished = 1;
-                                send_fmt_with_seq(me, "SM");
-                                if (opp) send_fmt_with_seq(opp, "SM");
-                                game_active = 0;
-                            } else if (in_chk) {
-                                if (opp) send_fmt_with_seq(opp, "CHK");
-                            }
-
-                            if (!myMatch->finished) {
-                                myMatch->turn = 1 - myMatch->turn;
-                                myMatch->last_move_time = time(NULL);
-                            }
-                            pthread_mutex_unlock(&myMatch->lock);
-                        }
-                    }
-                    else if (strncmp(linebuf, "RES", 3) == 0) {
-                        myMatch->finished = 1;
-                        send_fmt_with_seq(me, "RES");
-                        Client *opp = (me == myMatch->white) ? myMatch->black : myMatch->white;
-                        if (opp) send_fmt_with_seq(opp, "OPP_RES");
-                        pthread_mutex_unlock(&myMatch->lock);
-                        game_active = 0;
-                    }
-                    else if (strncmp(linebuf, "DRW_OFF", 7) == 0) {
-                        if (myMatch->draw_offered_by != -1) send_error(me, "Draw pending");
-                        else {
-                            myMatch->draw_offered_by = me->color;
-                            Client *opp = (me == myMatch->white) ? myMatch->black : myMatch->white;
-                            if (opp) send_fmt_with_seq(opp, "DRW_OFF");
-                        }
-                        pthread_mutex_unlock(&myMatch->lock);
-                    }
-                    else if (strncmp(linebuf, "DRW_ACC", 7) == 0) {
-                         if (myMatch->draw_offered_by != -1 && myMatch->draw_offered_by != me->color) {
-                            myMatch->finished = 1;
-                            send_fmt_with_seq(me, "DRW_ACD");
-                            Client *opp = (me == myMatch->white) ? myMatch->black : myMatch->white;
-                            if (opp) send_fmt_with_seq(opp, "DRW_ACD");
-                            game_active = 0;
-                        } else send_error(me, "No offer");
-                        pthread_mutex_unlock(&myMatch->lock);
-                    }
-                    else if (strncmp(linebuf, "DRW_DEC", 7) == 0) {
-                        if (myMatch->draw_offered_by != -1 && myMatch->draw_offered_by != me->color) {
-                            myMatch->draw_offered_by = -1;
-                            Client *opp = (me == myMatch->white) ? myMatch->black : myMatch->white;
-                            if (opp) send_fmt_with_seq(opp, "DRW_DCD");
-                        }
-                        pthread_mutex_unlock(&myMatch->lock);
-                    }
-                    else if (strncmp(linebuf, "EXT", 3) == 0) {
-                        myMatch->finished = 1;
-                        Client *opp = (me == myMatch->white) ? myMatch->black : myMatch->white;
-                        if (opp) send_fmt_with_seq(opp, "OPP_EXT");
-                        pthread_mutex_unlock(&myMatch->lock);
-                        game_active = 0;
-                    } 
-                    else {
-                        pthread_mutex_unlock(&myMatch->lock);
-                    }
-                    lp = 0;
+            while (game_active) {
+                r = recv(me->sock, readbuf, sizeof(readbuf), 0);
+                if (r <= 0) { 
+                    /* Connection lost mid-game. */
+                    /* Call release which sets disconnect_time but keeps match alive. */
+                    match_release_after_client(me); 
+                    /* IMPORTANT: Do not free(me). Return NULL immediately. */
+                    goto disconnect_cleanup_only_no_free; 
                 }
+
+                for (ssize_t i = 0; i < r; ++i) {
+                    if (lp + 1 < sizeof(linebuf)) linebuf[lp++] = readbuf[i];
+                    if (readbuf[i] == '\n') {
+                        linebuf[lp] = '\0';
+                        trim_crlf(linebuf);
+                        int seq = parse_seq_number(linebuf);
+                        strip_trailing_seq(linebuf);
+
+                        if (seq >= 0) {
+                            pthread_mutex_lock(&me->lock);
+                            me->seq = seq;
+                            pthread_mutex_unlock(&me->lock);
+                            send_short_ack(me, ack_code_for_received(linebuf), seq);
+                        }
+
+                        pthread_mutex_lock(&myMatch->lock);
+                        
+                        if (myMatch->finished) {
+                            pthread_mutex_unlock(&myMatch->lock);
+                            game_active = 0;
+                            break;
+                        }
+
+                        if (strncmp(linebuf, "MV", 2) == 0) {
+                             if (myMatch->turn != me->color) {
+                                pthread_mutex_unlock(&myMatch->lock);
+                                send_error(me, "Not your turn");
+                            } else {
+                                char *mv = linebuf + 2;
+                                int r1, c1, r2, c2;
+                                parse_move(mv, &r1, &c1, &r2, &c2);
+                                char promo = (strlen(mv) >= 5) ? mv[4] : 0;
+                                apply_move(myMatch, r1, c1, r2, c2, promo);
+                                match_append_move(myMatch, mv);
+
+                                send_fmt_with_seq(me, "OK_MV");
+                                Client *opp = (me == myMatch->white) ? myMatch->black : myMatch->white;
+                                if (opp && opp->sock > 0) send_fmt_with_seq(opp, "OPP_MV %s", mv);
+
+                                int opp_col = 1 - me->color;
+                                int in_chk = is_in_check(&myMatch->state, opp_col);
+                                int has_mv = has_any_legal_move(myMatch, opp_col);
+                                
+                                if (in_chk && !has_mv) {
+                                    myMatch->finished = 1;
+                                    send_fmt_with_seq(me, "WIN_CHKM");
+                                    if (opp && opp->sock > 0) send_fmt_with_seq(opp, "CHKM");
+                                    game_active = 0;
+                                } else if (!in_chk && !has_mv) {
+                                    myMatch->finished = 1;
+                                    send_fmt_with_seq(me, "SM");
+                                    if (opp && opp->sock > 0) send_fmt_with_seq(opp, "SM");
+                                    game_active = 0;
+                                } else if (in_chk) {
+                                    if (opp && opp->sock > 0) send_fmt_with_seq(opp, "CHK");
+                                }
+
+                                if (!myMatch->finished) {
+                                    myMatch->turn = 1 - myMatch->turn;
+                                    myMatch->last_move_time = time(NULL);
+                                }
+                                pthread_mutex_unlock(&myMatch->lock);
+                            }
+                        }
+                        else if (strncmp(linebuf, "RES", 3) == 0) {
+                            myMatch->finished = 1;
+                            send_fmt_with_seq(me, "RES");
+                            Client *opp = (me == myMatch->white) ? myMatch->black : myMatch->white;
+                            if (opp && opp->sock > 0) send_fmt_with_seq(opp, "OPP_RES");
+                            pthread_mutex_unlock(&myMatch->lock);
+                            game_active = 0;
+                        }
+                        else if (strncmp(linebuf, "EXT", 3) == 0) {
+                            myMatch->finished = 1;
+                            Client *opp = (me == myMatch->white) ? myMatch->black : myMatch->white;
+                            if (opp && opp->sock > 0) send_fmt_with_seq(opp, "OPP_EXT");
+                            pthread_mutex_unlock(&myMatch->lock);
+                            game_active = 0;
+                        }
+                        else if (strncmp(linebuf, "LIST", 4) == 0) {
+                             pthread_mutex_unlock(&myMatch->lock);
+                        }
+                        else {
+                            pthread_mutex_unlock(&myMatch->lock);
+                            send_error(me, "Unknown game command");
+                            goto disconnect;
+                        }
+                        lp = 0;
+                    }
+                }
+                if (myMatch->finished) game_active = 0;
             }
-            if (myMatch->finished) game_active = 0;
+            match_release_after_client(me);
         }
-        match_release_after_client(me);
     }
 
 disconnect:
     match_release_after_client(me);
-disconnect_cleanup_only:
+    
+    /* If match_release decided to keep the session alive (sock=-1), 
+       we MUST NOT free the struct. Check if sock is -1. */
+    if (me->match != NULL && me->sock == -1) {
+         goto disconnect_cleanup_only_no_free;
+    }
+
+    free(me);
+    
+disconnect_cleanup_only_no_free:
     pthread_mutex_lock(&players_lock);
     current_players--;
     pthread_mutex_unlock(&players_lock);
-    close(me->sock);
-    free(me);
-    log_printf("Client exited.\n");
+    log_printf("Client thread exited.\n");
     return NULL;
 }

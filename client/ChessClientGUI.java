@@ -35,6 +35,7 @@ public class ChessClientGUI {
     private volatile boolean waitingForOk = false;
     private volatile boolean gameEnded = false;
     private volatile boolean intentionalDisconnect = false;
+    private volatile boolean isReconnecting = false;
     
     // UI State
     private volatile boolean endOverlayShown = false;
@@ -44,6 +45,8 @@ public class ChessClientGUI {
     private JLabel statusLabel;
     private ResultOverlay resultOverlay;
     private NetworkClient networkClient;
+
+    private Timer lobbyTimer;
 
     // Navigation
     private JPanel cards; 
@@ -292,6 +295,12 @@ public class ChessClientGUI {
         btnPanel.add(btnExit);
         lobby.add(btnPanel, BorderLayout.SOUTH);
 
+        // Initialize auto-refresh timer (5 seconds)
+        lobbyTimer = new Timer(5000, e -> {
+            if (networkClient != null) networkClient.sendRaw("LIST");
+        });
+        lobbyTimer.setRepeats(true);
+
         return lobby;
     }
 
@@ -354,8 +363,9 @@ public class ChessClientGUI {
                 ((CardLayout)cards.getLayout()).show(cards, CARD_LOBBY);
                 statusLabel.setText("Connected as " + clientName);
                 
-                // 3. Refresh room list so we don't see our own ghost
+                // 3. Refresh room list and restart auto-refresh
                 networkClient.sendRaw("LIST");
+                if (lobbyTimer != null) lobbyTimer.start();
             }
         });
     }
@@ -461,6 +471,7 @@ public class ChessClientGUI {
         statusLabel.setText("Connecting to " + serverHost + ":" + serverPort + "...");
         statusLabel.setVisible(true);
         startConnection();
+        if (lobbyTimer != null) lobbyTimer.start();
     }
 
     private void onJoinRoomClicked() {
@@ -483,33 +494,15 @@ public class ChessClientGUI {
             statusLabel.setText("Connected as " + clientName);
             statusLabel.setVisible(true);
             if (networkClient != null) networkClient.sendRaw("LIST");
+            if (lobbyTimer != null) lobbyTimer.start();
         }
     }
 
     private void startConnection() {
         if (networkClient != null) networkClient.closeConnection();
-        // Reset flag; we are starting a fresh desired connection.
         intentionalDisconnect = false;
 
-        networkClient = new NetworkClient(new NetworkClient.NetworkListener() {
-            @Override public void onConnected() { System.out.println("Connected."); }
-            @Override public void onDisconnected() {
-                SwingUtilities.invokeLater(() -> {
-                    // Only return to Welcome screen if it wasn't an intentional cancel/reconnect
-                    if (!intentionalDisconnect) {
-                        JOptionPane.showMessageDialog(frame, "Connection Lost", "Error", JOptionPane.ERROR_MESSAGE);
-                        exitToWelcome();
-                    }
-                });
-            }
-            @Override public void onServerMessage(String line, int seq) { parseServerMessageWithSeq(line, seq); }
-            @Override public void onNetworkError(Exception ex) {
-                if (!intentionalDisconnect) SwingUtilities.invokeLater(() -> {
-                     JOptionPane.showMessageDialog(frame, "Network Error: " + ex.getMessage());
-                     exitToWelcome();
-                });
-            }
-        });
+        networkClient = new NetworkClient(createNetworkListener());
         Thread t = new Thread(() -> networkClient.connect(serverHost, serverPort, clientName));
         t.setDaemon(true);
         t.start();
@@ -522,6 +515,7 @@ public class ChessClientGUI {
         statusLabel.setVisible(false);
         ((CardLayout)cards.getLayout()).show(cards, CARD_WELCOME);
         if (waitingPanel != null) waitingPanel.stopAnimation();
+        if (lobbyTimer != null) lobbyTimer.stop();
     }
 
     private void parseServerMessageWithSeq(String msg, int seq) {
@@ -534,12 +528,35 @@ public class ChessClientGUI {
     private void parseServerMessage(String msg) {
         String u = msg.trim();
         
+        // Handle RESUME (reconnection success)
+        if (u.startsWith("RESUME")) {
+             SwingUtilities.invokeLater(() -> {
+                 if (lobbyTimer != null) lobbyTimer.stop();
+                 // Reconnection doesn't send full state (client has it). 
+                 // Just switch view back to game.
+                 ((CardLayout)cards.getLayout()).show(cards, CARD_GAME);
+                 statusLabel.setText("Game Resumed!");
+                 updateBoardUI();
+             });
+             return;
+        }
+        
+        // Handle WAIT_CONN (Opponent disconnected)
+        if (u.startsWith("WAIT_CONN")) {
+             SwingUtilities.invokeLater(() -> {
+                  statusLabel.setText("Opponent disconnected. Waiting...");
+             });
+             return;
+        }
+
         if (u.startsWith("LOBBY")) {
             SwingUtilities.invokeLater(() -> {
                 gameEnded = false; 
                 myColor = -1; 
                 waitingForOk = false;
                 
+                // If the end overlay is currently shown, we defer the switch 
+                // until the user clicks "Continue".
                 if (endOverlayShown) {
                     pendingLobbyReturn = true;
                 } else {
@@ -547,6 +564,7 @@ public class ChessClientGUI {
                     statusLabel.setText("Connected as " + clientName);
                     statusLabel.setVisible(true);
                     if (networkClient != null) networkClient.sendRaw("LIST");
+                    if (lobbyTimer != null) lobbyTimer.start();
                 }
             });
             return;
@@ -566,6 +584,7 @@ public class ChessClientGUI {
 
         if (u.startsWith("WAITING")) {
             SwingUtilities.invokeLater(() -> {
+                if (lobbyTimer != null) lobbyTimer.stop(); // Stop lobby refresh
                 ((CardLayout)cards.getLayout()).show(cards, CARD_WAITING);
                 statusLabel.setText("Hosting room... Waiting for opponent.");
                 if (waitingPanel != null) waitingPanel.startAnimation();
@@ -575,6 +594,7 @@ public class ChessClientGUI {
 
         if (u.startsWith("START")) {
             SwingUtilities.invokeLater(() -> {
+                if (lobbyTimer != null) lobbyTimer.stop(); // Stop lobby refresh
                 String[] p = u.split("\\s+");
                 String color = (p.length >= 3) ? p[p.length - 1] : "white";
                 opponentName = (p.length >= 3) ? p[1] : "Unknown";
@@ -611,7 +631,11 @@ public class ChessClientGUI {
         if (u.startsWith("ERR") || u.equals("04")) {
             // Remove "ERR " prefix if present (length 4) to show only the reason
             String u2 = u.startsWith("ERR ") ? u.substring(4) : u;
-            SwingUtilities.invokeLater(() -> JOptionPane.showMessageDialog(frame, "Server Error: " + u2));
+            SwingUtilities.invokeLater(() -> {
+                JOptionPane.showMessageDialog(frame, "Server Error: " + u2);
+                // Refresh list automatically if error occurs (e.g., joining a full/closed room)
+                if (networkClient != null) networkClient.sendRaw("LIST");
+            });
             waitingForOk = false;
             return;
         }
@@ -754,5 +778,91 @@ public class ChessClientGUI {
             } catch (IOException ignored) {}
         }
         JLabel p = new JLabel(); p.setOpaque(true); p.setBackground(fallback); return p;
+    }
+
+    private void attemptReconnect() {
+        if (isReconnecting || intentionalDisconnect) return;
+        isReconnecting = true;
+        
+        // Show blocking modal dialog
+        JDialog d = new JDialog(frame, "Connection Lost", true);
+        JPanel p = new JPanel(new BorderLayout());
+        p.setBorder(BorderFactory.createEmptyBorder(20,20,20,20));
+        JLabel lbl = new JLabel("Connection lost. Reconnecting...", SwingConstants.CENTER);
+        p.add(lbl, BorderLayout.CENTER);
+        JButton cancel = new JButton("Abort");
+        p.add(cancel, BorderLayout.SOUTH);
+        d.add(p);
+        d.setSize(300, 150);
+        d.setLocationRelativeTo(frame);
+        
+        // Timer to retry every 2s for ~14s total
+        Timer t = new Timer(2000, new ActionListener() {
+            int tries = 0;
+            @Override
+            public void actionPerformed(ActionEvent e) {
+                tries++;
+                lbl.setText("Reconnecting... (Attempt " + tries + "/7)");
+                
+                if (tries > 7) {
+                    ((Timer)e.getSource()).stop();
+                    d.dispose();
+                    isReconnecting = false;
+                    JOptionPane.showMessageDialog(frame, "Reconnection failed.", "Error", JOptionPane.ERROR_MESSAGE);
+                    exitToWelcome();
+                    return;
+                }
+                
+                // Try connecting in a background thread
+                new Thread(() -> {
+                     NetworkClient nc = new NetworkClient(createNetworkListener());
+                     nc.connect(serverHost, serverPort, clientName);
+                     if (nc.isConnected()) {
+                         // Success! Update UI on EDT
+                         SwingUtilities.invokeLater(() -> {
+                             networkClient = nc;
+                             ((Timer)e.getSource()).stop();
+                             d.dispose();
+                             isReconnecting = false;
+                             statusLabel.setText("Reconnected!");
+                         });
+                     }
+                }).start();
+            }
+        });
+        
+        cancel.addActionListener(e -> {
+            t.stop();
+            d.dispose();
+            isReconnecting = false;
+            exitToWelcome();
+        });
+        
+        t.start();
+        d.setVisible(true); // blocks interaction until connected or canceled
+    }
+
+    private NetworkClient.NetworkListener createNetworkListener() {
+        return new NetworkClient.NetworkListener() {
+            @Override public void onConnected() { System.out.println("Connected."); }
+            @Override public void onDisconnected() {
+                SwingUtilities.invokeLater(() -> {
+                    // If connection drops and we didn't intend it, try to reconnect
+                    if (!intentionalDisconnect && !isReconnecting) {
+                        attemptReconnect();
+                    } else if (!isReconnecting) {
+                         // If we are not reconnecting and it wasn't intentional, exit
+                         if (!intentionalDisconnect) exitToWelcome();
+                    }
+                });
+            }
+            @Override public void onServerMessage(String line, int seq) { parseServerMessageWithSeq(line, seq); }
+            @Override public void onNetworkError(Exception ex) {
+                // Treat errors (like socket write failure) as disconnects
+                if (!intentionalDisconnect && !isReconnecting) {
+                     SwingUtilities.invokeLater(() -> attemptReconnect());
+                }
+            }
+        };
     }
 }
