@@ -259,16 +259,28 @@ void *match_watchdog(void *arg) {
             continue; 
         }
 
-        /* 2. Disconnect Timeout - Explicit Check */
-        int w_dc = 0;
-        if (m->white && m->white->sock == -1) {
-             if (now - m->white->disconnect_time > DISCONNECT_TIMEOUT_SECONDS) w_dc = 1;
+        /* 2. ZOMBIE CHECK (Heartbeat Timeout) 
+           If socket is open (>0) but no data for 15s, kill it. */
+        if (m->white && m->white->sock > 0 && (now - m->white->last_heartbeat > 15)) {
+            log_printf("Client %s timed out (no heartbeat). Closing socket.\n", m->white->name);
+            /* Closing the socket causes the recv() in client_worker to fail, 
+               triggering the standard disconnect cleanup path. */
+            shutdown(m->white->sock, SHUT_RDWR);
+            close(m->white->sock);
+            m->white->sock = -1; 
+            m->white->disconnect_time = now;
         }
-        
-        int b_dc = 0;
-        if (m->black && m->black->sock == -1) {
-             if (now - m->black->disconnect_time > DISCONNECT_TIMEOUT_SECONDS) b_dc = 1;
+        if (m->black && m->black->sock > 0 && (now - m->black->last_heartbeat > 15)) {
+            log_printf("Client %s timed out (no heartbeat). Closing socket.\n", m->black->name);
+            shutdown(m->black->sock, SHUT_RDWR);
+            close(m->black->sock);
+            m->black->sock = -1; 
+            m->black->disconnect_time = now;
         }
+
+        /* 3. Disconnect Timeout (Grace period for reconnection) */
+        int w_dc = (m->white && m->white->sock == -1 && (now - m->white->disconnect_time > DISCONNECT_TIMEOUT_SECONDS));
+        int b_dc = (m->black && m->black->sock == -1 && (now - m->black->disconnect_time > DISCONNECT_TIMEOUT_SECONDS));
 
         if (w_dc || b_dc) {
             log_printf("Match %d forfeited due to disconnection timeout. W_DC=%d, B_DC=%d\n", m->id, w_dc, b_dc);

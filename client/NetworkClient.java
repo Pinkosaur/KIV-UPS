@@ -5,16 +5,7 @@ import java.io.OutputStreamWriter;
 import java.io.PrintWriter;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
-import java.util.concurrent.ThreadLocalRandom;
 
-/**
- * NetworkClient
- *
- * Handles TCP connection and the "/NNN" sequence protocol.
- * * KEY FIX: 
- * - Adopts the server's sequence number upon reception (Shared Sequence Model).
- * - Does not mistakenly send ACKs back to the server (which caused "Unknown Command" errors).
- */
 public class NetworkClient {
     public interface NetworkListener {
         void onConnected();
@@ -28,10 +19,15 @@ public class NetworkClient {
     private BufferedReader in;
     private PrintWriter out;
     private Thread readerThread;
+    
+    // Heartbeat components
+    private Thread heartbeatThread;
+    private volatile long lastRxTime = 0;
+    private static final long HEARTBEAT_INTERVAL = 2000; // Send PING every 2s
+    private static final long READ_TIMEOUT = 10000;      // Die if no data for 10s
 
     private volatile boolean closed = false;
     private volatile boolean connected = false;
-
     private final Object seqLock = new Object();
     private int seqOutbound = -1; 
 
@@ -45,134 +41,137 @@ public class NetworkClient {
 
         try {
             socket = new Socket(host, port);
-            // Disable Nagle's algorithm for lower latency
-            socket.setTcpNoDelay(true); 
-            
+            socket.setTcpNoDelay(true);
             in = new BufferedReader(new InputStreamReader(socket.getInputStream(), StandardCharsets.UTF_8));
             out = new PrintWriter(new OutputStreamWriter(socket.getOutputStream(), StandardCharsets.UTF_8), true);
+
             connected = true;
+            lastRxTime = System.currentTimeMillis(); // Init timer
 
-            // Initialize random seq (0..511)
-            synchronized (seqLock) {
-                seqOutbound = ThreadLocalRandom.current().nextInt(512);
-            }
-
-            try { listener.onConnected(); } catch (Exception ex) { ex.printStackTrace(); }
-
-            if (clientName != null) {
-                int used = sendRaw("HELLO " + clientName);
-                System.out.println("Internal: sent HELLO with seq=" + used);
-            }
-
-            readerThread = new Thread(this::readLoop, "NetworkClient-Reader");
+            // 1. Reader Thread
+            readerThread = new Thread(this::readLoop);
             readerThread.setDaemon(true);
             readerThread.start();
+            
+            // 2. Heartbeat Thread
+            heartbeatThread = new Thread(this::heartbeatLoop);
+            heartbeatThread.setDaemon(true);
+            heartbeatThread.start();
+
+            if (listener != null) listener.onConnected();
+            
+            // Handshake
+            sendRaw("HELLO " + clientName);
+
         } catch (IOException ex) {
-            safeCloseInternal();
-            connected = false;
-            try { listener.onNetworkError(ex); } catch (Exception ignore) {}
-        }
-    }
-
-    public boolean isConnected() { return connected && !closed && socket != null && !socket.isClosed(); }
-
-    /**
-     * Send a line to the server appending "/NNN".
-     * Updates local seqOutbound to (seq + 1) % 512.
-     */
-    public synchronized int sendRaw(String line) {
-        if (out == null || closed) return -1;
-        int usedSeq;
-        synchronized (seqLock) {
-            if (seqOutbound < 0) seqOutbound = 0;
-            usedSeq = seqOutbound;
-            seqOutbound = (seqOutbound + 1) % 512;
-        }
-        String s = String.format("%03d", usedSeq);
-        String lineWithSeq = line + "/" + s;
-        try {
-            out.println(lineWithSeq);
-            out.flush();
-            System.out.println(">> " + lineWithSeq);
-            return usedSeq;
-        } catch (Exception ex) {
-            try { listener.onNetworkError(ex); } catch (Exception ignore) {}
-            safeCloseInternal();
-            return -1;
+            closeConnection();
+            if (listener != null) listener.onNetworkError(ex);
         }
     }
     
-    public int sendMove(String move) {
-        if (move == null) return -1;
-        return sendRaw("MV" + move);
-    }
+    // Sends PINGs and checks for Timeouts
+    private void heartbeatLoop() {
+        while (connected && !closed) {
+            try {
+                Thread.sleep(HEARTBEAT_INTERVAL);
+                if (!connected) break;
 
-    public synchronized void closeConnection() {
-        if (closed) return;
-        closed = true;
-        safeCloseInternal();
-    }
-    
-    /**
-     * Called when we receive a valid sequence number from the server.
-     * We must update our next outbound sequence to match (seq + 1), 
-     * ensuring we stay in sync with the server's state.
-     */
-    public void syncSequenceFromReception(int recvSeq) {
-        synchronized (seqLock) {
-            // Next message we send should be recvSeq + 1
-            seqOutbound = (recvSeq + 1) % 512;
+                // A. Check for timeout
+                long silence = System.currentTimeMillis() - lastRxTime;
+                if (silence > READ_TIMEOUT) {
+                    System.err.println("Heartbeat timeout! No data for " + silence + "ms.");
+                    closeConnection(); // This triggers onDisconnected -> Reconnect UI
+                    break;
+                }
+
+                // B. Send PING
+                sendRaw("PING");
+
+            } catch (InterruptedException e) {
+                break;
+            } catch (Exception e) {
+                // If writing fails, reader loop or error handler will catch it
+            }
         }
     }
 
     private void readLoop() {
         try {
             String rawLine;
-            while (!closed && (rawLine = in.readLine()) != null) {
-                // Parse trailing /NNN
-                String payload = rawLine;
-                int recvSeq = -1;
-                int lastSlash = rawLine.lastIndexOf('/');
+            while ((rawLine = in.readLine()) != null) {
+                // Update heartbeat timestamp on ANY received data
+                lastRxTime = System.currentTimeMillis();
+
+                String line = rawLine.trim();
+                if (line.isEmpty()) continue;
                 
-                // robust check: ensures last part is exactly 3 digits
-                if (lastSlash >= 0 && rawLine.length() - lastSlash - 1 == 3) {
-                    String seqStr = rawLine.substring(lastSlash + 1);
+                // Filter out the Heartbeat ACK so UI doesn't see it
+                if (line.equals("PNG")) {
+                    continue; 
+                }
+
+                // Parse Protocol: MSG/SEQ
+                String payload = line;
+                int recvSeq = -1;
+                int lastSlash = line.lastIndexOf('/');
+                if (lastSlash > 0 && lastSlash < line.length() - 1) {
+                    String seqStr = line.substring(lastSlash + 1);
                     boolean allDigits = true;
                     for (int i = 0; i < seqStr.length(); ++i) {
-                        if (!Character.isDigit(seqStr.charAt(i))) { 
-                            allDigits = false; 
-                            break; 
-                        }
+                        if (!Character.isDigit(seqStr.charAt(i))) { allDigits = false; break; }
                     }
                     if (allDigits) {
                         try {
                             recvSeq = Integer.parseInt(seqStr);
-                            payload = rawLine.substring(0, lastSlash);
+                            payload = line.substring(0, lastSlash);
                         } catch (NumberFormatException ignored) {}
                     }
                 }
 
                 try {
-                    listener.onServerMessage(payload, recvSeq);
-                } catch (Exception ex) {
-                    ex.printStackTrace();
-                }
+                    if (listener != null) listener.onServerMessage(payload, recvSeq);
+                } catch (Exception ex) { ex.printStackTrace(); }
             }
-            try { listener.onDisconnected(); } catch (Exception ex) {}
+            // EOF
+            if (listener != null) listener.onDisconnected();
         } catch (IOException ex) {
-            if (!closed) {
-                try { listener.onNetworkError(ex); } catch (Exception ignore) {}
-            }
+            if (!closed && listener != null) listener.onNetworkError(ex);
         } finally {
-            safeCloseInternal();
+            closeConnection();
+        }
+    }
+    
+    public void sendRaw(String msg) {
+        if (!connected || out == null) return;
+        try {
+            out.println(msg);
+            if (out.checkError()) throw new IOException("Write failed");
+        } catch (Exception e) {
+            closeConnection();
         }
     }
 
-    private synchronized void safeCloseInternal() {
-        connected = false;
-        try { if (in != null) in.close(); } catch (Throwable ignored) {}
-        try { if (out != null) out.close(); } catch (Throwable ignored) {}
-        try { if (socket != null) socket.close(); } catch (Throwable ignored) {}
-        try { if (readerThread != null) readerThread.interrupt(); } catch (Throwable ignored) {}
+    public void sendMove(String mv) {
+        synchronized(seqLock) {
+            sendRaw("MV" + mv); 
+        }
     }
+    
+    public void syncSequenceFromReception(int serverSeq) {
+        synchronized(seqLock) {
+            this.seqOutbound = serverSeq;
+        }
+    }
+
+    public synchronized void closeConnection() {
+        if (closed) return;
+        closed = true;
+        connected = false;
+        try { if (heartbeatThread != null) heartbeatThread.interrupt(); } catch(Exception e){}
+        try { if (in != null) in.close(); } catch (Exception e) {}
+        try { if (out != null) out.close(); } catch (Exception e) {}
+        try { if (socket != null) socket.close(); } catch (Exception e) {}
+    }
+    
+    public boolean isConnected() { return connected; }
 }

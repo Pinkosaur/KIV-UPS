@@ -50,6 +50,7 @@ typedef struct Client {
     int seq;
     pthread_mutex_t lock;
     time_t disconnect_time;
+    time_t last_heartbeat;
 } Client;
 
 /* client thread entry */

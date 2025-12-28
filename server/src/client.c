@@ -271,11 +271,21 @@ game_loop:
                     goto disconnect_cleanup_only_no_free; 
                 }
 
+                me->last_heartbeat = time(NULL);
+
                 for (ssize_t i = 0; i < r; ++i) {
                     if (lp + 1 < sizeof(linebuf)) linebuf[lp++] = readbuf[i];
                     if (readbuf[i] == '\n') {
                         linebuf[lp] = '\0';
                         trim_crlf(linebuf);
+
+                        /* Handle PING immediately (No sequence number needed) */
+                        if (strcmp(linebuf, "PING") == 0) {
+                            send_line(me->sock, "PNG"); /* Short ACK */
+                            lp = 0;
+                            continue;
+                        }
+
                         int seq = parse_seq_number(linebuf);
                         strip_trailing_seq(linebuf);
 
