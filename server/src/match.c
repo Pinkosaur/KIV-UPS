@@ -133,7 +133,6 @@ void match_free(Match *m) {
     for (size_t i = 0; i < m->moves_count; ++i) free(m->moves[i]);
     free(m->moves);
     
-    /* Clean up clients if they are still attached (orphaned by disconnect) */
     if (m->white) { close(m->white->sock); free(m->white); }
     if (m->black) { close(m->black->sock); free(m->black); }
 
@@ -148,10 +147,8 @@ void match_release_after_client(Client *me) {
 
     pthread_mutex_lock(&m->lock);
     
-    /* CASE 1: Game is already over. Clean up normally. */
     if (m->finished) {
         if (other && other->sock > 0) {
-            /* If we are leaving but opponent is still there, notify them */
              send_line(other->sock, "OPP_EXT");
         }
         me->match = NULL;
@@ -163,27 +160,19 @@ void match_release_after_client(Client *me) {
         return;
     }
 
-    /* CASE 2: Game is ACTIVE. This is a disconnect. Persist the session. */
     log_printf("Player %s disconnected mid-game. Keeping session alive for %ds.\n", 
                me->name, DISCONNECT_TIMEOUT_SECONDS);
     
-    me->sock = -1; /* Mark as disconnected */
+    me->sock = -1; 
     me->disconnect_time = time(NULL);
     
-    /* Do NOT decrement refs yet, because we are effectively "holding" the seat 
-       for the reconnection. If we decr refs, match might be freed. */
-
-    /* Notify opponent to pause/wait */
     if (other && other->sock > 0) {
         send_fmt_with_seq(other, "WAIT_CONN"); 
-        /* Ideally, client shows "Opponent disconnected, waiting..." */
     }
 
     pthread_mutex_unlock(&m->lock);
-    /* IMPORTANT: We do NOT free(me) here. We leave it attached to the match. */
 }
 
-/* Attempts to find a disconnected client with 'name' and rebind it to 'new_sock' */
 Client *match_reconnect(const char *name, int new_sock) {
     pthread_mutex_lock(&room_registry_lock);
     Match *curr = global_room_list;
@@ -198,12 +187,8 @@ Client *match_reconnect(const char *name, int new_sock) {
             }
 
             if (target) {
-                /* Resurrect this client */
                 target->sock = new_sock;
                 target->disconnect_time = 0;
-                /* Reset sequence number on reconnect usually? 
-                   Actually, client will send HELLO/000. 
-                   We should update server's seq to match client's new seq or 0 */
                 target->seq = 0; 
                 
                 log_printf("Client %s reconnected to match %d.\n", name, curr->id);
@@ -248,11 +233,10 @@ void *match_watchdog(void *arg) {
         pthread_mutex_lock(&m->lock);
         if (m->finished && m->refs <= 0) {
             pthread_mutex_unlock(&m->lock);
-            match_free(m); /* Lazy cleanup */
+            match_free(m); 
             break;
         }
 
-        /* If finished but users still looking at result, just wait */
         if (m->finished) {
             pthread_mutex_unlock(&m->lock);
             continue;
@@ -272,20 +256,26 @@ void *match_watchdog(void *arg) {
             if (inactive && inactive->sock > 0) send_line(inactive->sock, "TOUT");
             if (winner && winner->sock > 0) send_line(winner->sock, "OPP_TOUT");
             pthread_mutex_unlock(&m->lock);
-            continue; /* Loop will clean up next time */
+            continue; 
         }
 
-        /* 2. Disconnect Timeout */
-        int w_dc = (m->white && m->white->sock == -1 && (now - m->white->disconnect_time > DISCONNECT_TIMEOUT_SECONDS));
-        int b_dc = (m->black && m->black->sock == -1 && (now - m->black->disconnect_time > DISCONNECT_TIMEOUT_SECONDS));
+        /* 2. Disconnect Timeout - Explicit Check */
+        int w_dc = 0;
+        if (m->white && m->white->sock == -1) {
+             if (now - m->white->disconnect_time > DISCONNECT_TIMEOUT_SECONDS) w_dc = 1;
+        }
+        
+        int b_dc = 0;
+        if (m->black && m->black->sock == -1) {
+             if (now - m->black->disconnect_time > DISCONNECT_TIMEOUT_SECONDS) b_dc = 1;
+        }
 
         if (w_dc || b_dc) {
-            log_printf("Match %d forfeited due to disconnection timeout.\n", m->id);
+            log_printf("Match %d forfeited due to disconnection timeout. W_DC=%d, B_DC=%d\n", m->id, w_dc, b_dc);
             m->finished = 1;
-            Client *winner = w_dc ? m->black : m->white; // If white dc'd, black wins
-            if (winner && winner->sock > 0) send_line(winner->sock, "OPP_EXT"); /* Or OPP_QUIT */
+            Client *winner = w_dc ? m->black : m->white; 
+            if (winner && winner->sock > 0) send_line(winner->sock, "OPP_EXT");
             
-            /* If BOTH disconnected, we just finish and let ref count cleanup */
             pthread_mutex_unlock(&m->lock);
             continue;
         }
