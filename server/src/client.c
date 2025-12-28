@@ -118,7 +118,6 @@ void *client_worker(void *arg) {
                 linebuf[lp] = '\0';
                 trim_crlf(linebuf);
                 
-                /* Handle PING during handshake if needed (unlikely but safe) */
                 if (strcmp(linebuf, "PING") == 0) {
                     send_line(me->sock, "PNG");
                     lp = 0;
@@ -135,6 +134,8 @@ void *client_worker(void *arg) {
 
                     Client *old_session = match_reconnect(name, me->sock);
                     if (old_session) {
+                        log_printf("[CLIENT] Reconnect success. Freeing temp struct %p, switching to old %p\n", me, old_session);
+                        pthread_mutex_destroy(&me->lock);
                         free(me); 
                         me = old_session;
                         send_short_ack(me, HELLO_ACK, seq);
@@ -182,7 +183,6 @@ void *client_worker(void *arg) {
             r = recv(me->sock, readbuf, sizeof(readbuf), 0);
             if (r <= 0) goto disconnect;
             
-            /* Update heartbeat on data */
             me->last_heartbeat = time(NULL);
 
             for (ssize_t i = 0; i < r; ++i) {
@@ -191,7 +191,6 @@ void *client_worker(void *arg) {
                     linebuf[lp] = '\0';
                     trim_crlf(linebuf);
                     
-                    /* Handle PING in Lobby */
                     if (strcmp(linebuf, "PING") == 0) {
                         send_line(me->sock, "PNG");
                         lp = 0;
@@ -249,14 +248,13 @@ void *client_worker(void *arg) {
                 ssize_t r = recv(me->sock, buf, sizeof(buf)-1, MSG_DONTWAIT);
                 if (r > 0) {
                     buf[r] = '\0';
-                    /* Update heartbeat */
                     me->last_heartbeat = time(NULL);
                     
                     if (strstr(buf, "EXT")) {
-                        match_release_after_client(me); 
+                        int persisted = match_release_after_client(me);
+                        if (!persisted) goto disconnect_cleanup_only_no_free_but_really_free;
                         break;
                     }
-                    /* Handle PING in Wait Loop */
                     if (strstr(buf, "PING")) {
                         send_line(me->sock, "PNG");
                     }
@@ -269,8 +267,11 @@ void *client_worker(void *arg) {
         }
 
         if (!me->match || me->match->finished) {
-            match_release_after_client(me);
-            continue; 
+            /* Logic for clean exit vs persist handled by helper */
+            int persisted = match_release_after_client(me);
+            if (!persisted) continue; /* Clean exit, restart lobby loop? Or exit app? */
+            /* If persisted=1 (unlikely here unless network cut during wait?), we exit */
+            goto disconnect_cleanup_only_no_free; 
         }
 
         /* --- GAME LOOP --- */
@@ -283,8 +284,8 @@ game_loop:
             while (game_active) {
                 r = recv(me->sock, readbuf, sizeof(readbuf), 0);
                 if (r <= 0) { 
-                    match_release_after_client(me); 
-                    goto disconnect_cleanup_only_no_free; 
+                    /* Network error/close mid-game. */
+                    goto disconnect; 
                 }
                 
                 me->last_heartbeat = time(NULL);
@@ -295,7 +296,6 @@ game_loop:
                         linebuf[lp] = '\0';
                         trim_crlf(linebuf);
                         
-                        /* Handle PING in Game Loop */
                         if (strcmp(linebuf, "PING") == 0) {
                             send_line(me->sock, "PNG");
                             lp = 0;
@@ -389,23 +389,25 @@ game_loop:
                 }
                 if (myMatch->finished) game_active = 0;
             }
-            match_release_after_client(me);
+            int persisted = match_release_after_client(me);
+            if (persisted) goto disconnect_cleanup_only_no_free;
         }
     }
 
-disconnect:
-    match_release_after_client(me);
-    
-    if (me->match != NULL && me->sock == -1) {
-         goto disconnect_cleanup_only_no_free;
+disconnect:;
+    int persisted = match_release_after_client(me);
+    if (persisted) {
+        log_printf("Client thread exited (Persisted).\n");
+        goto disconnect_cleanup_only_no_free;
     }
 
+disconnect_cleanup_only_no_free_but_really_free:
+    log_printf("Client thread exited (Freeing %p).\n", me);
     free(me);
     
 disconnect_cleanup_only_no_free:
     pthread_mutex_lock(&players_lock);
     current_players--;
     pthread_mutex_unlock(&players_lock);
-    log_printf("Client thread exited.\n");
     return NULL;
 }

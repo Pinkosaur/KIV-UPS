@@ -7,7 +7,7 @@
 #include "game.h"
 
 #define TURN_TIMEOUT_SECONDS 180
-#define DISCONNECT_TIMEOUT_SECONDS 60 /* Increased from 15 to 60 */
+#define DISCONNECT_TIMEOUT_SECONDS 60
 
 typedef struct Client Client;
 
@@ -47,7 +47,7 @@ Match *find_open_room(int id);
 
 /* Helpers */
 void match_free(Match *m);
-void match_release_after_client(Client *me);
+int match_release_after_client(Client *me); /* Changed from void to int */
 int match_append_move(Match *m, const char *mv);
 void notify_start(Match *m);
 void *match_watchdog(void *arg);

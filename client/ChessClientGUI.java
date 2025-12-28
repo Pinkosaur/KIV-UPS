@@ -206,12 +206,10 @@ public class ChessClientGUI {
         resultOverlay.setInnerBounds(0,0,b.width,b.height);
     }
     
-    // --- Reconnection Logic (FIXED) ---
-
-    private void attemptReconnect() {
+private void attemptReconnect() {
         if (isReconnecting || intentionalDisconnect) return;
         
-        // BUG FIX 1: Do not reconnect if we never established a session
+        // Only reconnect if we had a valid session previously
         if (!connectionEstablished) {
             SwingUtilities.invokeLater(() -> {
                 JOptionPane.showMessageDialog(frame, "Connection failed.", "Error", JOptionPane.ERROR_MESSAGE);
@@ -237,7 +235,7 @@ public class ChessClientGUI {
             int tries = 0;
             @Override
             public void actionPerformed(ActionEvent e) {
-                if (!isReconnecting) { // Stopped elsewhere
+                if (!isReconnecting) {
                     ((Timer)e.getSource()).stop();
                     d.dispose();
                     return;
@@ -255,40 +253,21 @@ public class ChessClientGUI {
                     return;
                 }
                 
-                // Try connecting in background
+                // FIX: Attempt connection DIRECTLY. If successful, keep it.
                 new Thread(() -> {
-                     // BUG FIX 2: Use a silent listener for probe to avoid recursion
-                     NetworkClient nc = new NetworkClient(new NetworkClient.NetworkListener() {
-                         @Override public void onConnected() { 
-                             // Success handled below
-                         }
-                         @Override public void onDisconnected() { /* Ignore failure in probe */ }
-                         @Override public void onServerMessage(String l, int s) { /* Ignore */ }
-                         @Override public void onNetworkError(Exception e) { /* Ignore */ }
-                     });
-                     
+                     NetworkClient nc = new NetworkClient(createNetworkListener());
                      nc.connect(serverHost, serverPort, clientName);
                      
                      if (nc.isConnected()) {
                          SwingUtilities.invokeLater(() -> {
-                             // Now switch to the REAL listener logic
-                             networkClient = new NetworkClient(createNetworkListener());
-                             // Hijack the socket from the probe (simulated by just reconnecting or swapping internals)
-                             // Since NetworkClient doesn't support hijacking, we just accept this probe instance
-                             // BUT we must attach the real listener. 
-                             // Simplified approach: Probe succeeded, so close probe and start REAL client.
-                             nc.closeConnection();
-                             
-                             // Start real client
-                             startConnection();
-                             
+                             networkClient = nc; // Keep this instance!
                              ((Timer)e.getSource()).stop();
                              d.dispose();
                              isReconnecting = false;
                              statusLabel.setText("Reconnected!");
                          });
                      } else {
-                         nc.closeConnection();
+                         nc.closeConnection(); // Clean up failed attempt
                      }
                 }).start();
             }
