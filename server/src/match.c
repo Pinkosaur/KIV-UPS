@@ -5,6 +5,7 @@
 #include <unistd.h>
 #include <pthread.h>
 #include <time.h>
+#include <sys/socket.h> 
 #include "match.h"
 #include "client.h"
 #include "game.h"
@@ -133,6 +134,7 @@ void match_free(Match *m) {
     for (size_t i = 0; i < m->moves_count; ++i) free(m->moves[i]);
     free(m->moves);
     
+    /* Clean up clients if they are still attached (orphaned by disconnect) */
     if (m->white) { close(m->white->sock); free(m->white); }
     if (m->black) { close(m->black->sock); free(m->black); }
 
@@ -147,6 +149,7 @@ void match_release_after_client(Client *me) {
 
     pthread_mutex_lock(&m->lock);
     
+    /* CASE 1: Game is already over. Clean up normally. */
     if (m->finished) {
         if (other && other->sock > 0) {
              send_line(other->sock, "OPP_EXT");
@@ -160,12 +163,14 @@ void match_release_after_client(Client *me) {
         return;
     }
 
+    /* CASE 2: Game is ACTIVE. This is a disconnect. Persist the session. */
     log_printf("Player %s disconnected mid-game. Keeping session alive for %ds.\n", 
                me->name, DISCONNECT_TIMEOUT_SECONDS);
     
     me->sock = -1; 
     me->disconnect_time = time(NULL);
     
+    /* Notify opponent to pause/wait */
     if (other && other->sock > 0) {
         send_fmt_with_seq(other, "WAIT_CONN"); 
     }
@@ -259,12 +264,9 @@ void *match_watchdog(void *arg) {
             continue; 
         }
 
-        /* 2. ZOMBIE CHECK (Heartbeat Timeout) 
-           If socket is open (>0) but no data for 15s, kill it. */
+        /* 2. ZOMBIE CHECK (Heartbeat Timeout) */
         if (m->white && m->white->sock > 0 && (now - m->white->last_heartbeat > 15)) {
             log_printf("Client %s timed out (no heartbeat). Closing socket.\n", m->white->name);
-            /* Closing the socket causes the recv() in client_worker to fail, 
-               triggering the standard disconnect cleanup path. */
             shutdown(m->white->sock, SHUT_RDWR);
             close(m->white->sock);
             m->white->sock = -1; 
@@ -278,12 +280,19 @@ void *match_watchdog(void *arg) {
             m->black->disconnect_time = now;
         }
 
-        /* 3. Disconnect Timeout (Grace period for reconnection) */
-        int w_dc = (m->white && m->white->sock == -1 && (now - m->white->disconnect_time > DISCONNECT_TIMEOUT_SECONDS));
-        int b_dc = (m->black && m->black->sock == -1 && (now - m->black->disconnect_time > DISCONNECT_TIMEOUT_SECONDS));
+        /* 3. Disconnect Timeout - Explicit Check */
+        int w_dc = 0;
+        if (m->white && m->white->sock == -1) {
+             if (now - m->white->disconnect_time > DISCONNECT_TIMEOUT_SECONDS) w_dc = 1;
+        }
+        
+        int b_dc = 0;
+        if (m->black && m->black->sock == -1) {
+             if (now - m->black->disconnect_time > DISCONNECT_TIMEOUT_SECONDS) b_dc = 1;
+        }
 
         if (w_dc || b_dc) {
-            log_printf("Match %d forfeited due to disconnection timeout. W_DC=%d, B_DC=%d\n", m->id, w_dc, b_dc);
+            log_printf("Match %d forfeited due to disconnection timeout.\n", m->id);
             m->finished = 1;
             Client *winner = w_dc ? m->black : m->white; 
             if (winner && winner->sock > 0) send_line(winner->sock, "OPP_EXT");

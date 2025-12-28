@@ -80,7 +80,12 @@ public class NetworkClient {
                 long silence = System.currentTimeMillis() - lastRxTime;
                 if (silence > READ_TIMEOUT) {
                     System.err.println("Heartbeat timeout! No data for " + silence + "ms.");
-                    closeConnection(); // This triggers onDisconnected -> Reconnect UI
+                    
+                    // FIX: Explicitly notify listener of disconnection before closing
+                    // This ensures the GUI starts the reconnection loop.
+                    if (listener != null) listener.onDisconnected();
+                    
+                    closeConnection(); 
                     break;
                 }
 
@@ -132,12 +137,13 @@ public class NetworkClient {
                     if (listener != null) listener.onServerMessage(payload, recvSeq);
                 } catch (Exception ex) { ex.printStackTrace(); }
             }
-            // EOF
+            // EOF (Server closed connection cleanly)
             if (listener != null) listener.onDisconnected();
         } catch (IOException ex) {
+            // Socket error (Server crashed or network cut)
             if (!closed && listener != null) listener.onNetworkError(ex);
         } finally {
-            closeConnection();
+            safeCloseInternal();
         }
     }
     
@@ -174,4 +180,12 @@ public class NetworkClient {
     }
     
     public boolean isConnected() { return connected; }
+    
+    private synchronized void safeCloseInternal() {
+        connected = false;
+        try { if (in != null) in.close(); } catch (Throwable ignored) {}
+        try { if (out != null) out.close(); } catch (Throwable ignored) {}
+        try { if (socket != null) socket.close(); } catch (Throwable ignored) {}
+        try { if (readerThread != null) readerThread.interrupt(); } catch (Throwable ignored) {}
+    }
 }

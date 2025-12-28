@@ -93,12 +93,14 @@ void *client_worker(void *arg) {
     size_t lp = 0;
     ssize_t r;
 
-    /* ... Connection limit check omitted for brevity ... */
     pthread_mutex_lock(&players_lock);
     current_players++;
     pthread_mutex_unlock(&players_lock);
 
     log_printf("New connection: %s\n", me->client_addr);
+
+    /* Init Heartbeat */
+    me->last_heartbeat = time(NULL); 
 
     /* 1. Handshake Phase */
     send_fmt_with_seq(me, "WELCOME ChessServer");
@@ -115,6 +117,14 @@ void *client_worker(void *arg) {
             if (readbuf[i] == '\n') {
                 linebuf[lp] = '\0';
                 trim_crlf(linebuf);
+                
+                /* Handle PING during handshake if needed (unlikely but safe) */
+                if (strcmp(linebuf, "PING") == 0) {
+                    send_line(me->sock, "PNG");
+                    lp = 0;
+                    continue;
+                }
+                
                 int seq = parse_seq_number(linebuf);
                 strip_trailing_seq(linebuf);
 
@@ -123,24 +133,18 @@ void *client_worker(void *arg) {
                     strncpy(name, linebuf + 6, sizeof(name)-1);
                     name[sizeof(name)-1] = '\0';
 
-                    /* Check if this is a reconnection attempt */
                     Client *old_session = match_reconnect(name, me->sock);
                     if (old_session) {
-                        /* RECONNECTION SUCCESSFUL */
-                        /* Free the temporary 'me' and switch to 'old_session' */
                         free(me); 
-                        me = old_session; /* me now points to the persistent session */
-                        
+                        me = old_session;
                         send_short_ack(me, HELLO_ACK, seq);
                         send_fmt_with_seq(me, "RESUME");
                         log_printf("Resumed session for %s\n", me->name);
-                        
                         got_hello = 1;
                         is_reconnect = 1;
                         break;
                     }
 
-                    /* Standard new login */
                     strncpy(me->name, name, sizeof(me->name)-1);
                     if (seq >= 0) {
                         pthread_mutex_lock(&me->lock);
@@ -159,9 +163,6 @@ void *client_worker(void *arg) {
         }
     }
 
-    /* 2. Loop */
-    
-    /* If we reconnected, we skip the Lobby and go straight to Game Loop */
     if (is_reconnect) {
          goto game_loop;
     }
@@ -176,16 +177,27 @@ void *client_worker(void *arg) {
         int in_lobby = 1;
         lp = 0;
 
-        /* --- LOBBY --- */
+        /* --- LOBBY LOOP --- */
         while (in_lobby) {
             r = recv(me->sock, readbuf, sizeof(readbuf), 0);
             if (r <= 0) goto disconnect;
+            
+            /* Update heartbeat on data */
+            me->last_heartbeat = time(NULL);
 
             for (ssize_t i = 0; i < r; ++i) {
                 if (lp + 1 < sizeof(linebuf)) linebuf[lp++] = readbuf[i];
                 if (readbuf[i] == '\n') {
                     linebuf[lp] = '\0';
                     trim_crlf(linebuf);
+                    
+                    /* Handle PING in Lobby */
+                    if (strcmp(linebuf, "PING") == 0) {
+                        send_line(me->sock, "PNG");
+                        lp = 0;
+                        continue;
+                    }
+
                     int seq = parse_seq_number(linebuf);
                     strip_trailing_seq(linebuf);
 
@@ -237,9 +249,16 @@ void *client_worker(void *arg) {
                 ssize_t r = recv(me->sock, buf, sizeof(buf)-1, MSG_DONTWAIT);
                 if (r > 0) {
                     buf[r] = '\0';
+                    /* Update heartbeat */
+                    me->last_heartbeat = time(NULL);
+                    
                     if (strstr(buf, "EXT")) {
                         match_release_after_client(me); 
                         break;
+                    }
+                    /* Handle PING in Wait Loop */
+                    if (strstr(buf, "PING")) {
+                        send_line(me->sock, "PNG");
                     }
                 } else if (r == 0) {
                     goto disconnect;
@@ -264,13 +283,10 @@ game_loop:
             while (game_active) {
                 r = recv(me->sock, readbuf, sizeof(readbuf), 0);
                 if (r <= 0) { 
-                    /* Connection lost mid-game. */
-                    /* Call release which sets disconnect_time but keeps match alive. */
                     match_release_after_client(me); 
-                    /* IMPORTANT: Do not free(me). Return NULL immediately. */
                     goto disconnect_cleanup_only_no_free; 
                 }
-
+                
                 me->last_heartbeat = time(NULL);
 
                 for (ssize_t i = 0; i < r; ++i) {
@@ -278,10 +294,10 @@ game_loop:
                     if (readbuf[i] == '\n') {
                         linebuf[lp] = '\0';
                         trim_crlf(linebuf);
-
-                        /* Handle PING immediately (No sequence number needed) */
+                        
+                        /* Handle PING in Game Loop */
                         if (strcmp(linebuf, "PING") == 0) {
-                            send_line(me->sock, "PNG"); /* Short ACK */
+                            send_line(me->sock, "PNG");
                             lp = 0;
                             continue;
                         }
@@ -356,7 +372,7 @@ game_loop:
                         else if (strncmp(linebuf, "EXT", 3) == 0) {
                             myMatch->finished = 1;
                             Client *opp = (me == myMatch->white) ? myMatch->black : myMatch->white;
-                            if (opp && opp->sock > 0) send_fmt_with_seq(opp, "OPP_EXT");
+                            if (opp) send_fmt_with_seq(opp, "OPP_EXT");
                             pthread_mutex_unlock(&myMatch->lock);
                             game_active = 0;
                         }
@@ -380,8 +396,6 @@ game_loop:
 disconnect:
     match_release_after_client(me);
     
-    /* If match_release decided to keep the session alive (sock=-1), 
-       we MUST NOT free the struct. Check if sock is -1. */
     if (me->match != NULL && me->sock == -1) {
          goto disconnect_cleanup_only_no_free;
     }

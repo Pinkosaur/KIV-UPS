@@ -7,7 +7,7 @@
 #include "game.h"
 
 #define TURN_TIMEOUT_SECONDS 180
-#define DISCONNECT_TIMEOUT_SECONDS 15
+#define DISCONNECT_TIMEOUT_SECONDS 60 /* Increased from 15 to 60 */
 
 typedef struct Client Client;
 
@@ -32,7 +32,6 @@ typedef struct Match {
     int b_can_queenside;
     int ep_r;
     int ep_c;
-
     int draw_offered_by;
     
     time_t last_move_time;
@@ -53,6 +52,7 @@ int match_append_move(Match *m, const char *mv);
 void notify_start(Match *m);
 void *match_watchdog(void *arg);
 
+/* Reconnection Helper */
 Client *match_reconnect(const char *name, int new_sock);
 
 #endif
