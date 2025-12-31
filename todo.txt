@@ -1,8 +1,4 @@
-- recovery after disconnection
-- client handling of connection lost
-- fix match timeout defeat during matchmaking
+- random first seq number
+- display turn timeout counter on client
+- turn timeout pauses when client disconnects, server sends it back for client-side display when reconnecting
 - test with InTCPtor
-- test unplug RJ45
-
-● obě aplikace ošetřují nevalidní síťové zprávy; protistranu odpojí při chybě
-o náhodná data nevyhovující protokolu (např. z /dev/urandom)
