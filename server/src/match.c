@@ -6,6 +6,7 @@
 #include <pthread.h>
 #include <time.h>
 #include <sys/socket.h> 
+#include <stdint.h>
 #include "match.h"
 #include "client.h"
 #include "game.h"
@@ -207,9 +208,10 @@ Client *match_reconnect(const char *name, int new_sock) {
             if (target) {
                 target->sock = new_sock;
                 target->disconnect_time = 0;
-                target->seq = 0; 
                 
-                /* FIX: Reset heartbeat timer so Watchdog doesn't immediately kill the reconnected session */
+                unsigned int seed = time(NULL) ^ (uintptr_t)target;
+                target->seq = rand_r(&seed) & 0x1FF;
+                
                 target->last_heartbeat = time(NULL);
 
                 log_printf("[MATCH] Client %p (%s) RECONNECTED to match %d.\n", target, name, curr->id);

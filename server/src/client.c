@@ -7,6 +7,7 @@
 #include <errno.h>
 #include <pthread.h>
 #include <stdarg.h>
+#include <stdint.h>
 #include "client.h"
 #include "match.h"
 #include "game.h"
@@ -91,7 +92,14 @@ const char *ack_code_for_received(const char *cmd) {
 
 void *client_worker(void *arg) {
     Client *me = (Client *)arg;
-    log_printf("[CLIENT %p] Worker started. Sock=%d\n", me, me->sock);
+    
+    /* FIX: Randomize initial sequence number (0-511) */
+    /* We use rand_r with a local seed based on time and pointer to avoid race conditions */
+    unsigned int seed = time(NULL) ^ (uintptr_t)me ^ me->sock;
+    me->seq = rand_r(&seed) & 0x1FF;
+
+    log_printf("[CLIENT %p] Worker started. Sock=%d. Initial Seq=%d\n", me, me->sock, me->seq);
+    
     char readbuf[BUF_SZ];
     char linebuf[LINEBUF_SZ];
     size_t lp = 0;
@@ -144,17 +152,24 @@ void *client_worker(void *arg) {
                         me = old_session;
                         send_short_ack(me, HELLO_ACK, seq);
                         
-                        /* FIX: Send RESUME with Opponent Name and Color to restore client state */
+                        /* Send RESUME to BOTH players */
                         Client *opp = NULL;
                         if (me->match) {
                              opp = (me->match->white == me) ? me->match->black : me->match->white;
                         }
                         const char *opp_name = (opp && opp->name[0]) ? opp->name : "Unknown";
-                        const char *color_str = (me->color == 0) ? "white" : "black";
+                        const char *my_color_str = (me->color == 0) ? "white" : "black";
                         
-                        send_fmt_with_seq(me, "RESUME %s %s", opp_name, color_str);
+                        /* 1. Send to ME (Reconnector) */
+                        send_fmt_with_seq(me, "RESUME %s %s", opp_name, my_color_str);
                         
-                        /* Send move history to sync board state */
+                        /* 2. Send to OPPONENT (Waiter) - Triggers 'Opponent returned' popup */
+                        if (opp && opp->sock > 0) {
+                             const char *opp_color_str = (me->color == 0) ? "black" : "white";
+                             send_fmt_with_seq(opp, "RESUME %s %s", me->name, opp_color_str);
+                        }
+                        
+                        /* Send move history to me (sync board state) */
                         if (me->match && me->match->moves_count > 0) {
                             char history[4096] = "";
                             for(size_t j=0; j<me->match->moves_count; j++) {
