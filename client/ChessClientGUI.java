@@ -16,6 +16,8 @@ import java.util.Set;
  * 2. Reconnection loop fixed.
  * 3. Abort properly stops the cycle.
  * 4. HISTORY command support for reconnection sync.
+ * 5. Added Disconnection/Resume Popups.
+ * 6. FIXED: Yellow move highlights persist across matches.
  */
 public class ChessClientGUI {
     private String serverHost = "127.0.0.1";
@@ -42,6 +44,7 @@ public class ChessClientGUI {
     // UI State
     private volatile boolean endOverlayShown = false;
     private volatile boolean pendingLobbyReturn = false;
+    private JDialog disconnectPopup = null; 
 
     private JFrame frame;
     private JLabel statusLabel;
@@ -103,7 +106,18 @@ public class ChessClientGUI {
     private void loadIcons() { imageManager.loadIcons(); }
     private ImageIcon getScaledIconForPiece(char p, int cellSize) { return imageManager.getScaledIconForPiece(p, cellSize); }
 
-    private void initBoardModel() { boardModel.initBoardModel(); this.board = boardModel.board; }
+    /* FIX: Clear last move highlights and selections when initializing the board */
+    private void initBoardModel() { 
+        boardModel.initBoardModel(); 
+        this.board = boardModel.board; 
+        
+        this.lastFrom = null;
+        this.lastTo = null;
+        this.selR = -1;
+        this.selC = -1;
+        this.highlighted.clear();
+    }
+    
     private void computeKingCheck() {
         if (myColor != 0 && myColor != 1) { kingInCheck = false; kingR = kingC = -1; return; }
         int[] pos = boardModel.findKing(board, myColor);
@@ -205,6 +219,14 @@ public class ChessClientGUI {
         resultOverlay.setInnerBounds(0,0,b.width,b.height);
     }
     
+    private void closeDisconnectPopup() {
+        if (disconnectPopup != null) {
+            disconnectPopup.setVisible(false);
+            disconnectPopup.dispose();
+            disconnectPopup = null;
+        }
+    }
+
     // --- Reconnection Logic ---
 
     private void attemptReconnect() {
@@ -522,6 +544,7 @@ public class ChessClientGUI {
 
     private void handleDisconnectAndExit() {
         intentionalDisconnect = true;
+        closeDisconnectPopup(); 
         frame.setVisible(false); 
         frame.dispose();
         new javax.swing.Timer(500, e -> System.exit(0)).start();
@@ -581,6 +604,7 @@ public class ChessClientGUI {
     private void exitToWelcome() {
         myColor = -1; myTurn = false; gameEnded = false;
         pendingLobbyReturn = false;
+        closeDisconnectPopup(); 
         resultOverlay.hideOverlay();
         statusLabel.setVisible(false);
         ((CardLayout)cards.getLayout()).show(cards, CARD_WELCOME);
@@ -600,7 +624,6 @@ public class ChessClientGUI {
     private void parseServerMessage(String msg) {
         String u = msg.trim();
         
-        /* FIX: Parse RESUME with OpponentName and Color to restore state */
         if (u.startsWith("RESUME")) {
              String[] parts = u.split("\\s+");
              if (parts.length >= 3) {
@@ -614,6 +637,9 @@ public class ChessClientGUI {
                  ((CardLayout)cards.getLayout()).show(cards, CARD_GAME);
                  statusLabel.setText("Game Resumed! VS " + (opponentName!=null?opponentName:"Unknown"));
                  updateBoardUI();
+                 
+                 closeDisconnectPopup();
+                 JOptionPane.showMessageDialog(frame, "Opponent returned. Resuming game.");
              });
              return;
         }
@@ -631,6 +657,10 @@ public class ChessClientGUI {
                 }
                 this.board = boardModel.board;
                 
+                // RESTORE highlight after replay
+                this.lastFrom = boardModel.lastFrom;
+                this.lastTo = boardModel.lastTo;
+                
                 // Calculate whose turn it is
                 boolean whiteTurn = (moves.length % 2 == 0);
                 myTurn = (myColor == 0 && whiteTurn) || (myColor == 1 && !whiteTurn);
@@ -643,6 +673,14 @@ public class ChessClientGUI {
         if (u.startsWith("WAIT_CONN")) {
              SwingUtilities.invokeLater(() -> {
                   statusLabel.setText("Opponent disconnected. Waiting...");
+                  if (disconnectPopup == null || !disconnectPopup.isVisible()) {
+                      JOptionPane pane = new JOptionPane("Your opponent is having trouble with their network connection.\n" +
+                                                         "You will win if they can't reconnect within 60 seconds.", 
+                                                         JOptionPane.WARNING_MESSAGE);
+                      disconnectPopup = pane.createDialog(frame, "Opponent Disconnected");
+                      disconnectPopup.setModal(false); 
+                      disconnectPopup.setVisible(true);
+                  }
              });
              return;
         }
@@ -770,6 +808,7 @@ public class ChessClientGUI {
 
     private void showEndOverlay(boolean isWinner, String subtitle) {
         SwingUtilities.invokeLater(() -> {
+            closeDisconnectPopup(); 
             endOverlayShown = true;
             gameEnded = true;
             if (resignBtn != null) resignBtn.setEnabled(false);
@@ -781,6 +820,7 @@ public class ChessClientGUI {
 
     private void showNeutralOverlay(String text) {
         SwingUtilities.invokeLater(() -> {
+            closeDisconnectPopup(); 
             endOverlayShown = true;
             gameEnded = true;
             if (resignBtn != null) resignBtn.setEnabled(false);
