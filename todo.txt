@@ -1,4 +1,3 @@
-- random first seq number
 - display turn timeout counter on client
 - turn timeout pauses when client disconnects, server sends it back for client-side display when reconnecting
 - test with InTCPtor
