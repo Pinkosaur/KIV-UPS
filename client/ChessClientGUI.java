@@ -13,8 +13,9 @@ import java.util.Set;
 /**
  * ChessClientGUI Fixed:
  * 1. Initial connection failure shows error, does not reconnect.
- * 2. Reconnection loop fixed (no stacking popups).
+ * 2. Reconnection loop fixed.
  * 3. Abort properly stops the cycle.
+ * 4. HISTORY command support for reconnection sync.
  */
 public class ChessClientGUI {
     private String serverHost = "127.0.0.1";
@@ -36,8 +37,6 @@ public class ChessClientGUI {
     private volatile boolean gameEnded = false;
     private volatile boolean intentionalDisconnect = false;
     private volatile boolean isReconnecting = false;
-    
-    // BUG FIX 1: Track if we ever successfully connected
     private volatile boolean connectionEstablished = false; 
     
     // UI State
@@ -114,7 +113,7 @@ public class ChessClientGUI {
     }
     private boolean inBounds(int r,int c){ return boardModel.inBounds(r,c); }
     private boolean isLegalMoveBasic(int r1,int c1,int r2,int c2) { return boardModel.isLegalMoveBasic(r1,c1,r2,c2); }
-    private boolean moveLeavesInCheck(char[][] b, int color, int r1,int c1,int r2,int c2) { return boardModel.moveLeavesInCheck(b,color,r1,c1,r2,c2); }
+    private boolean moveLeavesInCheck(char[][] b, int color, int r1, int c1, int r2, int c2) { return boardModel.moveLeavesInCheck(b,color,r1,c1,r2,c2); }
 
     private void updateBoardUI() {
         SwingUtilities.invokeLater(() -> {
@@ -206,10 +205,11 @@ public class ChessClientGUI {
         resultOverlay.setInnerBounds(0,0,b.width,b.height);
     }
     
-private void attemptReconnect() {
+    // --- Reconnection Logic ---
+
+    private void attemptReconnect() {
         if (isReconnecting || intentionalDisconnect) return;
         
-        // Only reconnect if we had a valid session previously
         if (!connectionEstablished) {
             SwingUtilities.invokeLater(() -> {
                 JOptionPane.showMessageDialog(frame, "Connection failed.", "Error", JOptionPane.ERROR_MESSAGE);
@@ -235,7 +235,7 @@ private void attemptReconnect() {
             int tries = 0;
             @Override
             public void actionPerformed(ActionEvent e) {
-                if (!isReconnecting) {
+                if (!isReconnecting) { 
                     ((Timer)e.getSource()).stop();
                     d.dispose();
                     return;
@@ -253,21 +253,28 @@ private void attemptReconnect() {
                     return;
                 }
                 
-                // FIX: Attempt connection DIRECTLY. If successful, keep it.
                 new Thread(() -> {
-                     NetworkClient nc = new NetworkClient(createNetworkListener());
+                     NetworkClient nc = new NetworkClient(new NetworkClient.NetworkListener() {
+                         @Override public void onConnected() { }
+                         @Override public void onDisconnected() { }
+                         @Override public void onServerMessage(String l, int s) { }
+                         @Override public void onNetworkError(Exception e) { }
+                     });
+                     
                      nc.connect(serverHost, serverPort, clientName);
                      
                      if (nc.isConnected()) {
                          SwingUtilities.invokeLater(() -> {
-                             networkClient = nc; // Keep this instance!
+                             networkClient = new NetworkClient(createNetworkListener());
+                             nc.closeConnection();
+                             startConnection();
                              ((Timer)e.getSource()).stop();
                              d.dispose();
                              isReconnecting = false;
                              statusLabel.setText("Reconnected!");
                          });
                      } else {
-                         nc.closeConnection(); // Clean up failed attempt
+                         nc.closeConnection();
                      }
                 }).start();
             }
@@ -288,7 +295,7 @@ private void attemptReconnect() {
         return new NetworkClient.NetworkListener() {
             @Override public void onConnected() { 
                 System.out.println("Connected."); 
-                connectionEstablished = true; // Mark as successful
+                connectionEstablished = true; 
             }
             @Override public void onDisconnected() {
                 SwingUtilities.invokeLater(() -> {
@@ -563,7 +570,7 @@ private void attemptReconnect() {
     private void startConnection() {
         if (networkClient != null) networkClient.closeConnection();
         intentionalDisconnect = false;
-        connectionEstablished = false; // Reset for new attempt
+        connectionEstablished = false; 
 
         networkClient = new NetworkClient(createNetworkListener());
         Thread t = new Thread(() -> networkClient.connect(serverHost, serverPort, clientName));
@@ -601,6 +608,29 @@ private void attemptReconnect() {
                  updateBoardUI();
              });
              return;
+        }
+        
+        /* FIX: Handle Move History to sync board state on reconnect */
+        if (u.startsWith("HISTORY")) {
+            String payload = u.substring("HISTORY".length()).trim();
+            if (payload.isEmpty()) return;
+            
+            String[] moves = payload.split(" ");
+            SwingUtilities.invokeLater(() -> {
+                initBoardModel(); // Reset to start
+                for (String mv : moves) {
+                    if (mv.isEmpty()) continue;
+                    boardModel.applyOpponentMove(mv); 
+                }
+                this.board = boardModel.board;
+                
+                // Calculate whose turn it is
+                boolean whiteTurn = (moves.length % 2 == 0);
+                myTurn = (myColor == 0 && whiteTurn) || (myColor == 1 && !whiteTurn);
+                
+                updateBoardUI();
+            });
+            return;
         }
         
         if (u.startsWith("WAIT_CONN")) {

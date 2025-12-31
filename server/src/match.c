@@ -63,6 +63,7 @@ char *get_room_list_str() {
     char *buf = malloc(4096);
     if (!buf) { pthread_mutex_unlock(&room_registry_lock); return NULL; }
     buf[0] = '\0';
+    size_t len = 0; 
     
     Match *curr = global_room_list;
     int count = 0;
@@ -70,7 +71,12 @@ char *get_room_list_str() {
         if (curr->black == NULL && !curr->finished) {
             char line[128];
             snprintf(line, sizeof(line), "%d:%s ", curr->id, curr->white->name);
-            strcat(buf, line);
+            
+            size_t line_len = strlen(line);
+            if (len + line_len < 4095) { 
+                strcat(buf, line);
+                len += line_len;
+            }
             count++;
         }
         curr = curr->next;
@@ -102,13 +108,15 @@ Match *match_create(Client *white) {
     m->last_move_time = 0; 
     m->turn_timeout_seconds = TURN_TIMEOUT_SECONDS;
     
-    m->refs = 1; 
+    m->refs = 2; 
 
     register_room(m);
 
     pthread_t wt;
     if (pthread_create(&wt, NULL, match_watchdog, m) == 0) {
         pthread_detach(wt);
+    } else {
+        m->refs = 1; 
     }
 
     return m;
@@ -142,7 +150,11 @@ void match_free(Match *m) {
 
 /* Returns 1 if client persisted (DO NOT FREE), 0 if released (SAFE TO FREE) */
 int match_release_after_client(Client *me) {
-    if (!me || !me->match) return 0; /* No match, safe to free */
+    if (!me) return 0;
+    if (!me->match) {
+        log_printf("[MATCH] Release %p: No match attached. Safe to free.\n", me);
+        return 0; 
+    }
     Match *m = me->match;
     Client *other = (me == m->white) ? m->black : m->white;
 
@@ -150,11 +162,6 @@ int match_release_after_client(Client *me) {
     
     /* CASE 1: Game Finished / Player Quitting (Not Reconnecting) */
     if (m->finished) {
-        if (other && other->sock > 0) {
-             send_line(other->sock, "OPP_EXT");
-        }
-        
-        /* Clear pointers so Watchdog doesn't touch dead memory */
         if (me == m->white) m->white = NULL;
         else if (me == m->black) m->black = NULL;
 
@@ -170,7 +177,7 @@ int match_release_after_client(Client *me) {
     }
 
     /* CASE 2: Game ACTIVE. Disconnect/Timeout. Persist Session. */
-    log_printf("[MATCH] Client %p (%s) disconnected. Keeping session alive. Sock=-1.\n", me, me->name);
+    log_printf("[MATCH] Client %p (%s) disconnected. Keeping session alive. Sock=-1. (Persist=1)\n", me, me->name);
     
     me->sock = -1; 
     me->disconnect_time = time(NULL);
@@ -202,6 +209,9 @@ Client *match_reconnect(const char *name, int new_sock) {
                 target->disconnect_time = 0;
                 target->seq = 0; 
                 
+                /* FIX: Reset heartbeat timer so Watchdog doesn't immediately kill the reconnected session */
+                target->last_heartbeat = time(NULL);
+
                 log_printf("[MATCH] Client %p (%s) RECONNECTED to match %d.\n", target, name, curr->id);
                 pthread_mutex_unlock(&curr->lock);
                 pthread_mutex_unlock(&room_registry_lock);
@@ -242,15 +252,14 @@ void *match_watchdog(void *arg) {
         sleep(1); 
 
         pthread_mutex_lock(&m->lock);
-        if (m->finished && m->refs <= 0) {
-            pthread_mutex_unlock(&m->lock);
-            match_free(m); 
-            break;
-        }
 
         if (m->finished) {
+            m->refs--; 
+            int last = (m->refs <= 0);
             pthread_mutex_unlock(&m->lock);
-            continue;
+            
+            if (last) match_free(m); 
+            break; 
         }
 
         time_t now = time(NULL);
@@ -263,7 +272,7 @@ void *match_watchdog(void *arg) {
         if (timed_out) {
             Client *inactive = (m->turn == 0) ? m->white : m->black;
             Client *winner   = (m->turn == 0) ? m->black : m->white;
-            m->finished = 1;
+            m->finished = 1; 
             if (inactive && inactive->sock > 0) send_line(inactive->sock, "TOUT");
             if (winner && winner->sock > 0) send_line(winner->sock, "OPP_TOUT");
             pthread_mutex_unlock(&m->lock);
@@ -299,10 +308,13 @@ void *match_watchdog(void *arg) {
 
         if (w_dc || b_dc) {
             log_printf("[WATCHDOG] Match %d forfeited due to disconnection timeout.\n", m->id);
-            m->finished = 1;
+            m->finished = 1; 
             Client *winner = w_dc ? m->black : m->white; 
             if (winner && winner->sock > 0) send_line(winner->sock, "OPP_EXT");
             
+            if (w_dc) m->refs--;
+            if (b_dc) m->refs--;
+
             pthread_mutex_unlock(&m->lock);
             continue;
         }

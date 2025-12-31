@@ -90,19 +90,22 @@ int main(int argc, char *argv[]) {
     log_printf("Server listening on %s:%d\n", addrbuf, port);
 
     while (1) {
+        log_printf("[MAIN] Starting iteration of the infinite loop in main.\n");
         struct sockaddr_in cliaddr;
         socklen_t clilen = sizeof(cliaddr);
         int csock = accept(srv, (struct sockaddr *)&cliaddr, &clilen);
         if (csock < 0) continue;
 
         Client *c = calloc(1, sizeof(Client));
-        if (!c) { close(csock); continue; }
+        if (!c) { log_printf("[MAIN] Failed to allocate client. closing sock and continuing.\n"); close(csock); continue; }
+        log_printf("[MAIN] Allocated client.\n");
 
         c->sock = csock;
         c->color = -1;
         c->paired = 0;
         c->match = NULL;
         c->seq = -1; 
+        log_printf("[MAIN] assigned values to client struct's attributes. Now initializing mutex.\n");
         
         /* Initialize the client lock immediately */
         pthread_mutex_init(&c->lock, NULL);
@@ -111,11 +114,13 @@ int main(int argc, char *argv[]) {
         snprintf(c->client_addr, sizeof(c->client_addr), "%s:%u", addrbuf, ntohs(cliaddr.sin_port));
 
         /* (Interface name lookup logic omitted for brevity, assumes same as previous) */
-
+        log_printf("[MAIN] Creating thread.\n");
         pthread_t tid;
         if (pthread_create(&tid, NULL, client_worker, c) != 0) {
+            log_printf("[MAIN] pthread_create returned non-zero value. Closing sock and freeing.\n");
             close(csock); free(c);
         } else {
+            log_printf("[MAIN] pthread_create returned 0. Detaching tid.\n");
             pthread_detach(tid);
         }
     }
