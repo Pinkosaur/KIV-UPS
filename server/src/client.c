@@ -31,7 +31,7 @@ void send_line(int sock, const char *msg) {
 
 void send_fmt_with_seq(Client *c, const char *fmt, ...) {
     if (!c || c->sock <= 0) return;
-    char payload[4096]; /* Increased buffer for History */
+    char payload[4096];
     va_list ap;
     va_start(ap, fmt);
     vsnprintf(payload, sizeof(payload), fmt, ap);
@@ -45,7 +45,6 @@ void send_fmt_with_seq(Client *c, const char *fmt, ...) {
     send_line(c->sock, out);
     pthread_mutex_unlock(&c->lock);
     
-    /* Log truncated if too long to avoid spamming console with history */
     if (strlen(out) > 128) 
         log_printf("SENT -> %s : %.128s... (truncated)\n", c->name[0] ? c->name : "unknown", out);
     else 
@@ -144,9 +143,18 @@ void *client_worker(void *arg) {
                         free(me); 
                         me = old_session;
                         send_short_ack(me, HELLO_ACK, seq);
-                        send_fmt_with_seq(me, "RESUME");
                         
-                        /* FIX: Send move history to sync board state */
+                        /* FIX: Send RESUME with Opponent Name and Color to restore client state */
+                        Client *opp = NULL;
+                        if (me->match) {
+                             opp = (me->match->white == me) ? me->match->black : me->match->white;
+                        }
+                        const char *opp_name = (opp && opp->name[0]) ? opp->name : "Unknown";
+                        const char *color_str = (me->color == 0) ? "white" : "black";
+                        
+                        send_fmt_with_seq(me, "RESUME %s %s", opp_name, color_str);
+                        
+                        /* Send move history to sync board state */
                         if (me->match && me->match->moves_count > 0) {
                             char history[4096] = "";
                             for(size_t j=0; j<me->match->moves_count; j++) {

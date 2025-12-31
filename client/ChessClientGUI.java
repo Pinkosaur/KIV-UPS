@@ -600,17 +600,24 @@ public class ChessClientGUI {
     private void parseServerMessage(String msg) {
         String u = msg.trim();
         
+        /* FIX: Parse RESUME with OpponentName and Color to restore state */
         if (u.startsWith("RESUME")) {
+             String[] parts = u.split("\\s+");
+             if (parts.length >= 3) {
+                 opponentName = parts[1];
+                 String cStr = parts[2];
+                 myColor = cStr.equalsIgnoreCase("white") ? 0 : 1;
+                 myTurn = (myColor == 0); // Default, updated by HISTORY
+             }
              SwingUtilities.invokeLater(() -> {
                  if (lobbyTimer != null) lobbyTimer.stop();
                  ((CardLayout)cards.getLayout()).show(cards, CARD_GAME);
-                 statusLabel.setText("Game Resumed!");
+                 statusLabel.setText("Game Resumed! VS " + (opponentName!=null?opponentName:"Unknown"));
                  updateBoardUI();
              });
              return;
         }
         
-        /* FIX: Handle Move History to sync board state on reconnect */
         if (u.startsWith("HISTORY")) {
             String payload = u.substring("HISTORY".length()).trim();
             if (payload.isEmpty()) return;
