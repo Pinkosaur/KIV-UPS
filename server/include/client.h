@@ -48,6 +48,7 @@ typedef struct Client {
     char server_ifname[IF_NAMESIZE];
     char server_ip[INET_ADDRSTRLEN];
     int seq;
+    int error_count;
     pthread_mutex_t lock;
     time_t disconnect_time;
     time_t last_heartbeat;

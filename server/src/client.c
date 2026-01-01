@@ -63,6 +63,20 @@ void send_error(Client *c, const char *reason) {
     send_fmt_with_seq(c, "ERR %s", reason);
 }
 
+/* NEW: Centralized error handling with counter */
+/* Returns 1 if client should be disconnected, 0 if warning sent */
+int handle_protocol_error(Client *me, const char *msg) {
+    me->error_count++;
+    log_printf("[CLIENT %s] Protocol/Logic Error %d/3: %s\n", me->name, me->error_count, msg);
+    
+    if (me->error_count >= 3) {
+        send_error(me, "Too many invalid messages. Disconnecting.");
+        return 1; 
+    }
+    send_error(me, msg);
+    return 0;
+}
+
 int parse_seq_number(const char *line) {
     if (!line) return -1;
     const char *p = strrchr(line, '/');
@@ -93,8 +107,6 @@ const char *ack_code_for_received(const char *cmd) {
 void *client_worker(void *arg) {
     Client *me = (Client *)arg;
     
-    /* FIX: Randomize initial sequence number (0-511) */
-    /* We use rand_r with a local seed based on time and pointer to avoid race conditions */
     unsigned int seed = time(NULL) ^ (uintptr_t)me ^ me->sock;
     me->seq = rand_r(&seed) & 0x1FF;
 
@@ -163,13 +175,13 @@ void *client_worker(void *arg) {
                         /* 1. Send to ME (Reconnector) */
                         send_fmt_with_seq(me, "RESUME %s %s", opp_name, my_color_str);
                         
-                        /* 2. Send to OPPONENT (Waiter) - Triggers 'Opponent returned' popup */
+                        /* 2. Send to OPPONENT (Waiter) */
                         if (opp && opp->sock > 0) {
                              const char *opp_color_str = (me->color == 0) ? "black" : "white";
                              send_fmt_with_seq(opp, "RESUME %s %s", me->name, opp_color_str);
                         }
                         
-                        /* Send move history to me (sync board state) */
+                        /* Send move history */
                         if (me->match && me->match->moves_count > 0) {
                             char history[4096] = "";
                             for(size_t j=0; j<me->match->moves_count; j++) {
@@ -197,8 +209,7 @@ void *client_worker(void *arg) {
                     got_hello = 1;
                     log_printf("Client identified as: %s\n", me->name);
                 } else {
-                    send_error(me, "Invalid protocol header");
-                    goto disconnect;
+                    if (handle_protocol_error(me, "Invalid protocol header")) goto disconnect;
                 }
                 lp = 0;
             }
@@ -206,7 +217,6 @@ void *client_worker(void *arg) {
     }
 
     if (is_reconnect) {
-         /* If we were just waiting (not paired), go back to wait loop */
          if (me->match && !me->paired) {
              send_fmt_with_seq(me, "WAITING Room %d", me->match->id);
              goto wait_loop;
@@ -282,8 +292,7 @@ void *client_worker(void *arg) {
                         goto disconnect;
                     }
                     else {
-                        send_error(me, "Unknown command");
-                        goto disconnect;
+                        if (handle_protocol_error(me, "Unknown command")) goto disconnect;
                     }
                     lp = 0;
                 }
@@ -301,7 +310,6 @@ void *client_worker(void *arg) {
                     me->last_heartbeat = time(NULL);
                     
                     if (strstr(buf, "EXT")) {
-                        /* Handle Room Cancellation */
                         if (me->match) {
                             Match *m = me->match;
                             m->white = NULL; 
@@ -309,7 +317,7 @@ void *client_worker(void *arg) {
                             me->color = -1;
                             match_free(m);
                         }
-                        break; /* Return to Lobby */
+                        break; 
                     }
 
                     if (strstr(buf, "PING")) {
@@ -378,23 +386,41 @@ game_loop:
                         if (strncmp(linebuf, "MV", 2) == 0) {
                              if (myMatch->turn != me->color) {
                                 pthread_mutex_unlock(&myMatch->lock);
-                                send_error(me, "Not your turn");
+                                if (handle_protocol_error(me, "Not your turn")) goto disconnect;
                             } else {
                                 char *mv = linebuf + 2;
+                                
+                                /* 1. Syntax Check */
                                 if (!is_move_format(mv)) {
                                     pthread_mutex_unlock(&myMatch->lock);
-                                    send_error(me, "Invalid move format");
+                                    if (handle_protocol_error(me, "Invalid move format")) goto disconnect;
                                     continue;
                                 }
 
                                 int r1, c1, r2, c2;
                                 parse_move(mv, &r1, &c1, &r2, &c2);
                                 
+                                /* 2. Bounds Check */
                                 if (!in_bounds(r1, c1) || !in_bounds(r2, c2)) {
                                     pthread_mutex_unlock(&myMatch->lock);
-                                    send_error(me, "Move out of bounds");
+                                    if (handle_protocol_error(me, "Move out of bounds")) goto disconnect;
                                     continue;
                                 }
+                                
+                                /* 3. Logic Check (Basic Rules: Move geometry, pieces) */
+                                if (!is_legal_move_basic(myMatch, me->color, r1, c1, r2, c2)) {
+                                    pthread_mutex_unlock(&myMatch->lock);
+                                    if (handle_protocol_error(me, "Illegal move rule violation")) goto disconnect;
+                                    continue;
+                                }
+
+                                /* 4. Logic Check (King Safety) */
+                                if (move_leaves_in_check(myMatch, me->color, r1, c1, r2, c2)) {
+                                    pthread_mutex_unlock(&myMatch->lock);
+                                    if (handle_protocol_error(me, "Move leaves king in check")) goto disconnect;
+                                    continue;
+                                }
+
                                 char promo = (strlen(mv) >= 5) ? mv[4] : 0;
                                 apply_move(myMatch, r1, c1, r2, c2, promo);
                                 match_append_move(myMatch, mv);
@@ -477,8 +503,8 @@ game_loop:
                         }
                         else {
                             pthread_mutex_unlock(&myMatch->lock);
-                            send_error(me, "Unknown game command");
-                            goto disconnect;
+                            if (handle_protocol_error(me, "Unknown game command")) goto disconnect;
+                            lp = 0;
                         }
                         lp = 0;
                     }

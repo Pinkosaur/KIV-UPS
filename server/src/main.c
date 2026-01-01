@@ -105,6 +105,7 @@ int main(int argc, char *argv[]) {
         c->paired = 0;
         c->match = NULL;
         c->seq = -1; 
+        c->error_count = 0;
         log_printf("[MAIN] assigned values to client struct's attributes. Now initializing mutex.\n");
         
         /* Initialize the client lock immediately */
