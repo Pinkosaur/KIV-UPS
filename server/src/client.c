@@ -63,7 +63,6 @@ void send_error(Client *c, const char *reason) {
     send_fmt_with_seq(c, "ERR %s", reason);
 }
 
-/* NEW: Centralized error handling with counter */
 /* Returns 1 if client should be disconnected, 0 if warning sent */
 int handle_protocol_error(Client *me, const char *msg) {
     me->error_count++;
@@ -164,7 +163,10 @@ void *client_worker(void *arg) {
                         me = old_session;
                         send_short_ack(me, HELLO_ACK, seq);
                         
-                        /* Send RESUME to BOTH players */
+                        /* Resume game timer if possible */
+                        match_try_resume(me->match);
+
+                        /* Send RESUME messages */
                         Client *opp = NULL;
                         if (me->match) {
                              opp = (me->match->white == me) ? me->match->black : me->match->white;
@@ -172,13 +174,14 @@ void *client_worker(void *arg) {
                         const char *opp_name = (opp && opp->name[0]) ? opp->name : "Unknown";
                         const char *my_color_str = (me->color == 0) ? "white" : "black";
                         
-                        /* 1. Send to ME (Reconnector) */
+                        /* 1. Send to ME (Reconnector) - Silent Resume */
                         send_fmt_with_seq(me, "RESUME %s %s", opp_name, my_color_str);
                         
-                        /* 2. Send to OPPONENT (Waiter) */
+                        /* 2. Send to OPPONENT (Waiter) - Notify Opponent Resumed */
                         if (opp && opp->sock > 0) {
                              const char *opp_color_str = (me->color == 0) ? "black" : "white";
-                             send_fmt_with_seq(opp, "RESUME %s %s", me->name, opp_color_str);
+                             /* FIX: Use distinct command so opponent client knows to show popup */
+                             send_fmt_with_seq(opp, "OPP_RESUME %s %s", me->name, opp_color_str);
                         }
                         
                         /* Send move history */
@@ -193,6 +196,13 @@ void *client_worker(void *arg) {
                             send_fmt_with_seq(me, "HISTORY %s", history);
                         }
                         
+                        /* Send current timer state */
+                        pthread_mutex_lock(&me->match->lock);
+                        int remaining = match_get_remaining_time(me->match);
+                        pthread_mutex_unlock(&me->match->lock);
+                        send_fmt_with_seq(me, "TIME %d", remaining);
+                        if (opp && opp->sock > 0) send_fmt_with_seq(opp, "TIME %d", remaining);
+
                         log_printf("Resumed session for %s\n", me->name);
                         got_hello = 1;
                         is_reconnect = 1;
@@ -390,7 +400,6 @@ game_loop:
                             } else {
                                 char *mv = linebuf + 2;
                                 
-                                /* 1. Syntax Check */
                                 if (!is_move_format(mv)) {
                                     pthread_mutex_unlock(&myMatch->lock);
                                     if (handle_protocol_error(me, "Invalid move format")) goto disconnect;
@@ -400,21 +409,18 @@ game_loop:
                                 int r1, c1, r2, c2;
                                 parse_move(mv, &r1, &c1, &r2, &c2);
                                 
-                                /* 2. Bounds Check */
                                 if (!in_bounds(r1, c1) || !in_bounds(r2, c2)) {
                                     pthread_mutex_unlock(&myMatch->lock);
                                     if (handle_protocol_error(me, "Move out of bounds")) goto disconnect;
                                     continue;
                                 }
                                 
-                                /* 3. Logic Check (Basic Rules: Move geometry, pieces) */
                                 if (!is_legal_move_basic(myMatch, me->color, r1, c1, r2, c2)) {
                                     pthread_mutex_unlock(&myMatch->lock);
                                     if (handle_protocol_error(me, "Illegal move rule violation")) goto disconnect;
                                     continue;
                                 }
 
-                                /* 4. Logic Check (King Safety) */
                                 if (move_leaves_in_check(myMatch, me->color, r1, c1, r2, c2)) {
                                     pthread_mutex_unlock(&myMatch->lock);
                                     if (handle_protocol_error(me, "Move leaves king in check")) goto disconnect;
@@ -428,6 +434,11 @@ game_loop:
                                 send_fmt_with_seq(me, "OK_MV");
                                 Client *opp = (me == myMatch->white) ? myMatch->black : myMatch->white;
                                 if (opp && opp->sock > 0) send_fmt_with_seq(opp, "OPP_MV %s", mv);
+                                
+                                /* Send Time Reset to both */
+                                int remaining = myMatch->turn_timeout_seconds;
+                                send_fmt_with_seq(me, "TIME %d", remaining);
+                                if (opp && opp->sock > 0) send_fmt_with_seq(opp, "TIME %d", remaining);
 
                                 int opp_col = 1 - me->color;
                                 int in_chk = is_in_check(&myMatch->state, opp_col);

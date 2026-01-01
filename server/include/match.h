@@ -37,6 +37,10 @@ typedef struct Match {
     time_t last_move_time;
     int turn_timeout_seconds;
     int refs; 
+
+    /* [NEW] Timer Pause State */
+    time_t elapsed_at_pause; 
+    int is_paused;
 } Match;
 
 /* Global Room Management */
@@ -52,7 +56,9 @@ int match_append_move(Match *m, const char *mv);
 void notify_start(Match *m);
 void *match_watchdog(void *arg);
 
-/* Reconnection Helper */
+/* Reconnection & Timer Helpers */
 Client *match_reconnect(const char *name, int new_sock);
+void match_try_resume(Match *m); /* [NEW] Resume timer if both players present */
+int match_get_remaining_time(Match *m); /* [NEW] Get seconds left for current turn */
 
 #endif

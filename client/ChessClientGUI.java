@@ -18,6 +18,9 @@ import java.util.Set;
  * 4. HISTORY command support for reconnection sync.
  * 5. Added Disconnection/Resume Popups.
  * 6. FIXED: Yellow move highlights persist across matches.
+ * 7. Added Turn Timer UI with Fixes:
+ * - Reconnector doesn't see "Opponent returned" (uses OPP_RESUME)
+ * - Timer clears on game end.
  */
 public class ChessClientGUI {
     private String serverHost = "127.0.0.1";
@@ -48,10 +51,13 @@ public class ChessClientGUI {
 
     private JFrame frame;
     private JLabel statusLabel;
+    private JLabel timerLabel; 
     private ResultOverlay resultOverlay;
     private NetworkClient networkClient;
 
     private Timer lobbyTimer;
+    private Timer turnTimer; 
+    private int remainingSeconds = 0; 
 
     // Navigation
     private JPanel cards; 
@@ -188,13 +194,23 @@ public class ChessClientGUI {
 
         frame.getContentPane().add(cards, BorderLayout.CENTER);
 
-        statusLabel = new JLabel("Not connected", SwingConstants.CENTER);
-        statusLabel.setOpaque(true);
-        statusLabel.setBackground(new Color(40, 40, 40));
+        /* Create Status Bar panel at the bottom */
+        JPanel statusPanel = new JPanel(new BorderLayout());
+        statusPanel.setOpaque(true);
+        statusPanel.setBackground(new Color(40, 40, 40));
+        statusPanel.setBorder(BorderFactory.createEmptyBorder(4, 12, 4, 12));
+
+        statusLabel = new JLabel("Not connected", SwingConstants.LEFT);
         statusLabel.setForeground(Color.WHITE);
-        statusLabel.setBorder(BorderFactory.createEmptyBorder(8, 12, 8, 12));
-        statusLabel.setVisible(false);
-        frame.getContentPane().add(statusLabel, BorderLayout.NORTH);
+        statusPanel.add(statusLabel, BorderLayout.CENTER);
+
+        timerLabel = new JLabel("--:--", SwingConstants.RIGHT);
+        timerLabel.setForeground(Color.CYAN);
+        timerLabel.setFont(new Font("Monospaced", Font.BOLD, 16));
+        timerLabel.setBorder(BorderFactory.createEmptyBorder(0, 20, 0, 0));
+        statusPanel.add(timerLabel, BorderLayout.EAST);
+
+        frame.getContentPane().add(statusPanel, BorderLayout.NORTH); 
 
         resultOverlay = new ResultOverlay(e -> onOverlayContinueClicked());
         frame.getLayeredPane().add(resultOverlay, JLayeredPane.MODAL_LAYER);
@@ -205,12 +221,28 @@ public class ChessClientGUI {
             public void componentShown(ComponentEvent e) { resizeOverlay(); }
         });
 
+        /* Initialize local turn timer */
+        turnTimer = new Timer(1000, e -> {
+            if (remainingSeconds > 0) {
+                remainingSeconds--;
+                updateTimerDisplay();
+            }
+        });
+
         frame.setPreferredSize(new Dimension(1100, 760));
         frame.setMinimumSize(new Dimension(800, 600));
         frame.pack();
         frame.setLocationRelativeTo(null);
         frame.setVisible(true);
         resizeOverlay();
+    }
+
+    private void updateTimerDisplay() {
+        int m = remainingSeconds / 60;
+        int s = remainingSeconds % 60;
+        timerLabel.setText(String.format("%02d:%02d", m, s));
+        if (remainingSeconds < 30) timerLabel.setForeground(Color.RED);
+        else timerLabel.setForeground(Color.CYAN);
     }
 
     private void resizeOverlay() {
@@ -610,6 +642,7 @@ public class ChessClientGUI {
         ((CardLayout)cards.getLayout()).show(cards, CARD_WELCOME);
         if (waitingPanel != null) waitingPanel.stopAnimation();
         if (lobbyTimer != null) lobbyTimer.stop();
+        if (turnTimer != null) turnTimer.stop();
         connectionEstablished = false;
         isReconnecting = false;
     }
@@ -624,13 +657,24 @@ public class ChessClientGUI {
     private void parseServerMessage(String msg) {
         String u = msg.trim();
         
+        if (u.startsWith("TIME")) {
+            String val = u.substring(4).trim();
+            try {
+                remainingSeconds = Integer.parseInt(val);
+                updateTimerDisplay();
+                if (!turnTimer.isRunning()) turnTimer.start();
+            } catch (Exception ignore){}
+            return;
+        }
+
+        /* FIX: Handle silent resume for self */
         if (u.startsWith("RESUME")) {
              String[] parts = u.split("\\s+");
              if (parts.length >= 3) {
                  opponentName = parts[1];
                  String cStr = parts[2];
                  myColor = cStr.equalsIgnoreCase("white") ? 0 : 1;
-                 myTurn = (myColor == 0); // Default, updated by HISTORY
+                 myTurn = (myColor == 0); 
              }
              SwingUtilities.invokeLater(() -> {
                  if (lobbyTimer != null) lobbyTimer.stop();
@@ -638,6 +682,20 @@ public class ChessClientGUI {
                  statusLabel.setText("Game Resumed! VS " + (opponentName!=null?opponentName:"Unknown"));
                  updateBoardUI();
                  
+                 closeDisconnectPopup();
+                 // NO POPUP here, just silent restore
+             });
+             return;
+        }
+        
+        /* FIX: Handle opponent resume notification */
+        if (u.startsWith("OPP_RESUME")) {
+             String[] parts = u.split("\\s+");
+             if (parts.length >= 3) {
+                 opponentName = parts[1];
+                 // cStr is opponent color, we can infer ours or ignore
+             }
+             SwingUtilities.invokeLater(() -> {
                  closeDisconnectPopup();
                  JOptionPane.showMessageDialog(frame, "Opponent returned. Resuming game.");
              });
@@ -650,21 +708,17 @@ public class ChessClientGUI {
             
             String[] moves = payload.split(" ");
             SwingUtilities.invokeLater(() -> {
-                initBoardModel(); // Reset to start
+                initBoardModel(); 
                 for (String mv : moves) {
                     if (mv.isEmpty()) continue;
                     boardModel.applyOpponentMove(mv); 
                 }
                 this.board = boardModel.board;
-                
-                // RESTORE highlight after replay
                 this.lastFrom = boardModel.lastFrom;
                 this.lastTo = boardModel.lastTo;
                 
-                // Calculate whose turn it is
                 boolean whiteTurn = (moves.length % 2 == 0);
                 myTurn = (myColor == 0 && whiteTurn) || (myColor == 1 && !whiteTurn);
-                
                 updateBoardUI();
             });
             return;
@@ -673,6 +727,8 @@ public class ChessClientGUI {
         if (u.startsWith("WAIT_CONN")) {
              SwingUtilities.invokeLater(() -> {
                   statusLabel.setText("Opponent disconnected. Waiting...");
+                  if (turnTimer != null) turnTimer.stop();
+                  
                   if (disconnectPopup == null || !disconnectPopup.isVisible()) {
                       JOptionPane pane = new JOptionPane("Your opponent is having trouble with their network connection.\n" +
                                                          "You will win if they can't reconnect within 60 seconds.", 
@@ -786,6 +842,9 @@ public class ChessClientGUI {
         
         if (isGameEnd && networkClient != null) {
             networkClient.sendRaw("LIST");
+            if (turnTimer != null) turnTimer.stop(); 
+            /* FIX: Clear timer display on game end */
+            SwingUtilities.invokeLater(() -> timerLabel.setText("--:--"));
         }
 
         if (u.startsWith("DRW_OFF") || u.equals("10")) {

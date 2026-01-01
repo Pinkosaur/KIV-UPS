@@ -109,6 +109,10 @@ Match *match_create(Client *white) {
     m->last_move_time = 0; 
     m->turn_timeout_seconds = TURN_TIMEOUT_SECONDS;
     
+    /* [NEW] Init pause state */
+    m->elapsed_at_pause = 0;
+    m->is_paused = 0;
+
     m->refs = 2; 
 
     register_room(m);
@@ -180,6 +184,14 @@ int match_release_after_client(Client *me) {
     /* CASE 2: Game ACTIVE. Disconnect/Timeout. Persist Session. */
     log_printf("[MATCH] Client %p (%s) disconnected. Keeping session alive. Sock=-1. (Persist=1)\n", me, me->name);
     
+    /* [NEW] Pause Timer logic */
+    if (!m->is_paused && m->last_move_time > 0) {
+        m->elapsed_at_pause = time(NULL) - m->last_move_time;
+        m->last_move_time = 0; /* 0 indicates paused to watchdog */
+        m->is_paused = 1;
+        log_printf("[MATCH] Match %d paused. Elapsed in turn: %ld\n", m->id, m->elapsed_at_pause);
+    }
+
     me->sock = -1; 
     me->disconnect_time = time(NULL);
     
@@ -227,6 +239,38 @@ Client *match_reconnect(const char *name, int new_sock) {
     return NULL;
 }
 
+/* [NEW] Called when a client fully reconnects (HELLO handshake done). 
+   Checks if both players are now present to resume timer. */
+void match_try_resume(Match *m) {
+    if (!m) return;
+    pthread_mutex_lock(&m->lock);
+    
+    /* Only resume if we were paused and both players are connected */
+    if (m->is_paused && m->white && m->white->sock > 0 && m->black && m->black->sock > 0) {
+        m->last_move_time = time(NULL) - m->elapsed_at_pause;
+        m->elapsed_at_pause = 0;
+        m->is_paused = 0;
+        log_printf("[MATCH] Match %d resumed. Timer restored.\n", m->id);
+    }
+    
+    pthread_mutex_unlock(&m->lock);
+}
+
+/* [NEW] Helper to get current remaining time */
+int match_get_remaining_time(Match *m) {
+    /* No locking here, caller must hold lock */
+    if (m->finished) return 0;
+    if (m->is_paused) {
+        int left = m->turn_timeout_seconds - m->elapsed_at_pause;
+        return (left < 0) ? 0 : left;
+    }
+    if (m->last_move_time == 0) return m->turn_timeout_seconds; // Should not happen if active
+    
+    int elapsed = time(NULL) - m->last_move_time;
+    int left = m->turn_timeout_seconds - elapsed;
+    return (left < 0) ? 0 : left;
+}
+
 int match_append_move(Match *m, const char *mv) {
     if (!m || !mv) return -1;
     if (m->moves_count + 1 > m->moves_cap) {
@@ -244,6 +288,11 @@ void notify_start(Match *m) {
     if (!m || !m->white || !m->black) return;
     send_fmt_with_seq(m->white, "START %s white", m->black->name);
     send_fmt_with_seq(m->black, "START %s black", m->white->name);
+    
+    /* [NEW] Send initial time */
+    int t = m->turn_timeout_seconds;
+    send_fmt_with_seq(m->white, "TIME %d", t);
+    send_fmt_with_seq(m->black, "TIME %d", t);
 }
 
 void *match_watchdog(void *arg) {
@@ -267,8 +316,9 @@ void *match_watchdog(void *arg) {
         time_t now = time(NULL);
 
         /* 1. Game Move Timeout */
+        /* [NEW] Only check timeout if not paused */
         int timed_out = 0;
-        if (m->last_move_time != 0 && (now - m->last_move_time) >= m->turn_timeout_seconds) {
+        if (!m->is_paused && m->last_move_time != 0 && (now - m->last_move_time) >= m->turn_timeout_seconds) {
             timed_out = 1;
         }
         if (timed_out) {
