@@ -3,10 +3,9 @@
 
 #include <net/if.h>
 #include <netinet/in.h>
+#include <pthread.h>
 #include "match.h"
-
-#define BUF_SZ 1024
-#define LINEBUF_SZ 64
+#include "config.h"
 
 /* Acknowledgement messages */
 #define MM_TOUT_ACK "01"
@@ -36,19 +35,29 @@
 #define RES_ACK_CS "23"
 #define RESUME_ACK "26"
 
+/* Client States for FSM */
+typedef enum {
+    STATE_HANDSHAKE,
+    STATE_LOBBY,
+    STATE_WAITING,
+    STATE_GAME,
+    STATE_DISCONNECTED
+} ClientState;
 
 /* Client struct */
 typedef struct Client {
     int sock;
-    char name[64];
+    char name[NAME_LEN];
     int color; /* 0 - white, 1 - black*/
     int paired;
     Match *match;
-    char client_addr[64];
-    char server_ifname[IF_NAMESIZE];
-    char server_ip[INET_ADDRSTRLEN];
+    char client_addr[ADDR_LEN];
+    
+    /* State Management */
+    ClientState state;
     int seq;
     int error_count;
+    
     pthread_mutex_t lock;
     time_t disconnect_time;
     time_t last_heartbeat;
@@ -61,16 +70,12 @@ void *client_worker(void *arg);
 void send_raw(int sock, const char *msg);
 void send_line(int sock, const char *msg);
 void send_error(Client *c, const char *reason);
-void send_line_client(Client *c, const char *msg);
-
-int wait_for_ack(Client *c, const char *ack_code);
-int parse_seq_number(const char *msg);
 void send_fmt_with_seq(Client *c, const char *fmt, ...);
-
-/* utility used by server & client */
-void match_close_and_notify(Match *m, Client *leaver, const char *reason_to_opponent);
-void close_sockets(Match *m);
+void send_short_ack(Client *c, const char *ack_code, int recv_seq);
 
 void trim_crlf(char *s);
+int parse_seq_number(const char *line);
+void strip_trailing_seq(char *buf);
+const char *ack_code_for_received(const char *cmd);
 
 #endif /* CLIENT_H */

@@ -6,9 +6,6 @@
 #include <time.h>
 #include "game.h"
 
-#define TURN_TIMEOUT_SECONDS 180
-#define DISCONNECT_TIMEOUT_SECONDS 60
-
 typedef struct Client Client;
 
 typedef struct Match {

@@ -11,6 +11,7 @@
 #include "client.h"
 #include "game.h"
 #include "logging.h"
+#include "config.h"
 
 extern int max_rooms;
 
@@ -20,8 +21,7 @@ static int next_room_id = 1;
 static int current_room_count = 0;
 static pthread_mutex_t room_registry_lock = PTHREAD_MUTEX_INITIALIZER;
 
-/* --- Room Registry Helpers --- */
-
+/* ... (register_room, unregister_room, find_open_room SAME AS BEFORE) ... */
 void register_room(Match *m) {
     pthread_mutex_lock(&room_registry_lock);
     m->id = next_room_id++;
@@ -61,28 +61,34 @@ Match *find_open_room(int id) {
 
 char *get_room_list_str() {
     pthread_mutex_lock(&room_registry_lock);
-    char *buf = malloc(4096);
+    char *buf = malloc(BIG_BUFFER_SZ);
     if (!buf) { pthread_mutex_unlock(&room_registry_lock); return NULL; }
-    buf[0] = '\0';
-    size_t len = 0; 
+    
+    char *ptr = buf;
+    char *end = buf + BIG_BUFFER_SZ;
+    *ptr = '\0';
     
     Match *curr = global_room_list;
     int count = 0;
     while (curr) {
         if (curr->black == NULL && !curr->finished) {
-            char line[128];
-            snprintf(line, sizeof(line), "%d:%s ", curr->id, curr->white->name);
-            
-            size_t line_len = strlen(line);
-            if (len + line_len < 4095) { 
-                strcat(buf, line);
-                len += line_len;
+            /* OPTIMIZATION: Track pointer to avoid O(N^2) strcat scanning */
+            int remaining = end - ptr;
+            if (remaining > 1) {
+                int written = snprintf(ptr, remaining, "%d:%s ", curr->id, curr->white->name);
+                if (written > 0 && written < remaining) {
+                    ptr += written;
+                }
             }
             count++;
         }
         curr = curr->next;
     }
-    if (count == 0) strcpy(buf, "EMPTY");
+    
+    if (count == 0) {
+        snprintf(buf, BIG_BUFFER_SZ, "EMPTY");
+    }
+    
     pthread_mutex_unlock(&room_registry_lock);
     return buf;
 }
@@ -108,11 +114,8 @@ Match *match_create(Client *white) {
 
     m->last_move_time = 0; 
     m->turn_timeout_seconds = TURN_TIMEOUT_SECONDS;
-    
-    /* [NEW] Init pause state */
     m->elapsed_at_pause = 0;
     m->is_paused = 0;
-
     m->refs = 2; 
 
     register_room(m);
@@ -153,7 +156,6 @@ void match_free(Match *m) {
     free(m);
 }
 
-/* Returns 1 if client persisted (DO NOT FREE), 0 if released (SAFE TO FREE) */
 int match_release_after_client(Client *me) {
     if (!me) return 0;
     if (!me->match) {
@@ -165,7 +167,6 @@ int match_release_after_client(Client *me) {
 
     pthread_mutex_lock(&m->lock);
     
-    /* CASE 1: Game Finished / Player Quitting (Not Reconnecting) */
     if (m->finished) {
         if (me == m->white) m->white = NULL;
         else if (me == m->black) m->black = NULL;
@@ -174,34 +175,28 @@ int match_release_after_client(Client *me) {
         m->refs--;
         int last = (m->refs <= 0);
         
-        log_printf("[MATCH] Release client %p (Quit/Finished). Refs=%d. Destroy=%d\n", me, m->refs, last);
         pthread_mutex_unlock(&m->lock);
-        
         if (last) match_free(m);
-        return 0; /* 0 = Thread should free(me) */
+        return 0; 
     }
 
-    /* CASE 2: Game ACTIVE. Disconnect/Timeout. Persist Session. */
-    log_printf("[MATCH] Client %p (%s) disconnected. Keeping session alive. Sock=-1. (Persist=1)\n", me, me->name);
+    log_printf("[MATCH] Client %p (%s) disconnected. Keeping session alive.\n", me, me->name);
     
-    /* [NEW] Pause Timer logic */
     if (!m->is_paused && m->last_move_time > 0) {
         m->elapsed_at_pause = time(NULL) - m->last_move_time;
-        m->last_move_time = 0; /* 0 indicates paused to watchdog */
+        m->last_move_time = 0; 
         m->is_paused = 1;
-        log_printf("[MATCH] Match %d paused. Elapsed in turn: %ld\n", m->id, m->elapsed_at_pause);
     }
 
     me->sock = -1; 
     me->disconnect_time = time(NULL);
     
-    /* Notify opponent */
     if (other && other->sock > 0) {
         send_fmt_with_seq(other, "WAIT_CONN"); 
     }
 
     pthread_mutex_unlock(&m->lock);
-    return 1; /* 1 = Persisted. Thread must NOT free(me) */
+    return 1; 
 }
 
 Client *match_reconnect(const char *name, int new_sock) {
@@ -223,7 +218,6 @@ Client *match_reconnect(const char *name, int new_sock) {
                 
                 unsigned int seed = time(NULL) ^ (uintptr_t)target;
                 target->seq = rand_r(&seed) & 0x1FF;
-                
                 target->last_heartbeat = time(NULL);
 
                 log_printf("[MATCH] Client %p (%s) RECONNECTED to match %d.\n", target, name, curr->id);
@@ -239,32 +233,25 @@ Client *match_reconnect(const char *name, int new_sock) {
     return NULL;
 }
 
-/* [NEW] Called when a client fully reconnects (HELLO handshake done). 
-   Checks if both players are now present to resume timer. */
 void match_try_resume(Match *m) {
     if (!m) return;
     pthread_mutex_lock(&m->lock);
-    
-    /* Only resume if we were paused and both players are connected */
     if (m->is_paused && m->white && m->white->sock > 0 && m->black && m->black->sock > 0) {
         m->last_move_time = time(NULL) - m->elapsed_at_pause;
         m->elapsed_at_pause = 0;
         m->is_paused = 0;
         log_printf("[MATCH] Match %d resumed. Timer restored.\n", m->id);
     }
-    
     pthread_mutex_unlock(&m->lock);
 }
 
-/* [NEW] Helper to get current remaining time */
 int match_get_remaining_time(Match *m) {
-    /* No locking here, caller must hold lock */
     if (m->finished) return 0;
     if (m->is_paused) {
         int left = m->turn_timeout_seconds - m->elapsed_at_pause;
         return (left < 0) ? 0 : left;
     }
-    if (m->last_move_time == 0) return m->turn_timeout_seconds; // Should not happen if active
+    if (m->last_move_time == 0) return m->turn_timeout_seconds;
     
     int elapsed = time(NULL) - m->last_move_time;
     int left = m->turn_timeout_seconds - elapsed;
@@ -289,7 +276,6 @@ void notify_start(Match *m) {
     send_fmt_with_seq(m->white, "START %s white", m->black->name);
     send_fmt_with_seq(m->black, "START %s black", m->white->name);
     
-    /* [NEW] Send initial time */
     int t = m->turn_timeout_seconds;
     send_fmt_with_seq(m->white, "TIME %d", t);
     send_fmt_with_seq(m->black, "TIME %d", t);
@@ -308,7 +294,6 @@ void *match_watchdog(void *arg) {
             m->refs--; 
             int last = (m->refs <= 0);
             pthread_mutex_unlock(&m->lock);
-            
             if (last) match_free(m); 
             break; 
         }
@@ -316,7 +301,6 @@ void *match_watchdog(void *arg) {
         time_t now = time(NULL);
 
         /* 1. Game Move Timeout */
-        /* [NEW] Only check timeout if not paused */
         int timed_out = 0;
         if (!m->is_paused && m->last_move_time != 0 && (now - m->last_move_time) >= m->turn_timeout_seconds) {
             timed_out = 1;
@@ -332,15 +316,15 @@ void *match_watchdog(void *arg) {
         }
 
         /* 2. ZOMBIE CHECK (Heartbeat Timeout) */
-        if (m->white && m->white->sock > 0 && (now - m->white->last_heartbeat > 15)) {
-            log_printf("[WATCHDOG] Client %p (%s) timed out (no heartbeat). Closing socket.\n", m->white, m->white->name);
+        if (m->white && m->white->sock > 0 && (now - m->white->last_heartbeat > HEARTBEAT_TIMEOUT_SECONDS)) {
+            log_printf("[WATCHDOG] Client %p (%s) timed out (no heartbeat).\n", m->white, m->white->name);
             shutdown(m->white->sock, SHUT_RDWR);
             close(m->white->sock);
             m->white->sock = -1; 
             m->white->disconnect_time = now;
         }
-        if (m->black && m->black->sock > 0 && (now - m->black->last_heartbeat > 15)) {
-            log_printf("[WATCHDOG] Client %p (%s) timed out (no heartbeat). Closing socket.\n", m->black, m->black->name);
+        if (m->black && m->black->sock > 0 && (now - m->black->last_heartbeat > HEARTBEAT_TIMEOUT_SECONDS)) {
+            log_printf("[WATCHDOG] Client %p (%s) timed out (no heartbeat).\n", m->black, m->black->name);
             shutdown(m->black->sock, SHUT_RDWR);
             close(m->black->sock);
             m->black->sock = -1; 
@@ -352,21 +336,17 @@ void *match_watchdog(void *arg) {
         if (m->white && m->white->sock == -1) {
              if (now - m->white->disconnect_time > DISCONNECT_TIMEOUT_SECONDS) w_dc = 1;
         }
-        
         int b_dc = 0;
         if (m->black && m->black->sock == -1) {
              if (now - m->black->disconnect_time > DISCONNECT_TIMEOUT_SECONDS) b_dc = 1;
         }
 
         if (w_dc || b_dc) {
-            log_printf("[WATCHDOG] Match %d forfeited due to disconnection timeout.\n", m->id);
             m->finished = 1; 
             Client *winner = w_dc ? m->black : m->white; 
             if (winner && winner->sock > 0) send_line(winner->sock, "OPP_EXT");
-            
             if (w_dc) m->refs--;
             if (b_dc) m->refs--;
-
             pthread_mutex_unlock(&m->lock);
             continue;
         }
