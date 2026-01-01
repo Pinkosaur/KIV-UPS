@@ -1,3 +1,4 @@
 - display turn timeout counter on client
+- room not unselected when list is refreshed
 - turn timeout pauses when client disconnects, server sends it back for client-side display when reconnecting
 - test with InTCPtor
