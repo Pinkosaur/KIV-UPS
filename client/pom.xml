@@ -12,7 +12,6 @@
   <packaging>jar</packaging>
 
   <name>Chess Client</name>
-  <description>Refactored ChessClientGUI and supporting classes</description>
 
   <properties>
     <maven.compiler.release>17</maven.compiler.release>
@@ -44,7 +43,7 @@
         <configuration>
           <archive>
             <manifest>
-              <mainClass>ChessClientGUI</mainClass>
+              <mainClass>ChessClient</mainClass>
               <addDefaultImplementationEntries>true</addDefaultImplementationEntries>
             </manifest>
           </archive>
@@ -57,7 +56,7 @@
         <artifactId>exec-maven-plugin</artifactId>
         <version>3.1.0</version>
         <configuration>
-          <mainClass>ChessClientGUI</mainClass>
+          <mainClass>ChessClient</mainClass>
           <classpathScope>runtime</classpathScope>
           <additionalClasspathElements>
             <additionalClasspathElement>${classes.output.dir}</additionalClasspathElement>
