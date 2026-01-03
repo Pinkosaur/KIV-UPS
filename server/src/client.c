@@ -1,4 +1,4 @@
-/* client.c */
+/* src/client.c */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -18,7 +18,8 @@ extern int max_players;
 static int current_players = 0;
 static pthread_mutex_t players_lock = PTHREAD_MUTEX_INITIALIZER;
 
-/* ... [Protocol Helpers send_raw, send_line, etc. UNCHANGED] ... */
+/* --- Protocol Helpers --- */
+
 void send_raw(int sock, const char *msg) {
     if (sock > 0) send(sock, msg, strlen(msg), MSG_NOSIGNAL);
 }
@@ -70,12 +71,17 @@ int handle_protocol_error(Client *me, const char *msg) {
     if (me->error_count >= MAX_ERRORS) {
         send_error(me, "Too many invalid messages. Disconnecting.");
         
-        /* [FIX 3] Notify opponent about the kick before disconnecting */
-        if (me->match && !me->match->finished) {
-            Client *opp = (me->match->white == me) ? me->match->black : me->match->white;
-            if (opp && opp->sock > 0) {
-                send_fmt_with_seq(opp, "OPP_KICK"); /* New command */
+        /* [FIX] Notify opponent and MARK MATCH FINISHED so it doesn't persist */
+        if (me->match) {
+            pthread_mutex_lock(&me->match->lock);
+            if (!me->match->finished) {
+                Client *opp = (me->match->white == me) ? me->match->black : me->match->white;
+                if (opp && opp->sock > 0) {
+                    send_fmt_with_seq(opp, "OPP_KICK");
+                }
+                me->match->finished = 1; /* Forces room destruction in release_after_client */
             }
+            pthread_mutex_unlock(&me->match->lock);
         }
         
         return 1; /* Disconnect */

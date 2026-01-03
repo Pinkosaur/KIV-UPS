@@ -23,8 +23,6 @@ public class NetworkClient {
     
     private Thread readerThread;
     private Thread heartbeatThread;
-    
-    /* [FIX] Writer thread components */
     private Thread writerThread;
     private final BlockingQueue<String> writeQueue = new LinkedBlockingQueue<>();
     
@@ -41,7 +39,7 @@ public class NetworkClient {
         this.listener = listener;
     }
 
-    public synchronized void connect(String host, int port, String clientName) {
+    public synchronized void connect(String host, int port, String clientName) throws IOException {
         if (connected) return;
         closed = false;
 
@@ -54,17 +52,14 @@ public class NetworkClient {
             connected = true;
             lastRxTime = System.currentTimeMillis(); 
 
-            // 1. Reader Thread
             readerThread = new Thread(this::readLoop);
             readerThread.setDaemon(true);
             readerThread.start();
             
-            // 2. Heartbeat Thread
             heartbeatThread = new Thread(this::heartbeatLoop);
             heartbeatThread.setDaemon(true);
             heartbeatThread.start();
             
-            // 3. [FIX] Writer Thread
             writerThread = new Thread(this::writeLoop);
             writerThread.setDaemon(true);
             writerThread.start();
@@ -75,25 +70,25 @@ public class NetworkClient {
 
         } catch (IOException ex) {
             closeConnection();
-            if (listener != null) listener.onNetworkError(ex);
+            throw ex; // Re-throw so ChessClient knows connect failed immediately
         }
     }
     
-    /* [FIX] Background Write Loop */
     private void writeLoop() {
         while (connected && !closed) {
             try {
-                // Blocks until message available
                 String msg = writeQueue.take();
                 if (out != null) {
                     out.println(msg);
-                    if (out.checkError()) throw new IOException("Write failed");
+                    /* [FIX] If write fails, notify error BEFORE closing so logic knows it crashed */
+                    if (out.checkError()) {
+                        IOException ex = new IOException("Write failed (Broken Pipe)");
+                        if (listener != null) listener.onNetworkError(ex);
+                        closeConnection();
+                        break;
+                    }
                 }
             } catch (InterruptedException e) {
-                // Thread interrupted on close
-                break;
-            } catch (IOException e) {
-                if (!closed) closeConnection();
                 break;
             } catch (Exception e) {
                 e.printStackTrace();
@@ -153,11 +148,8 @@ public class NetworkClient {
         }
     }
     
-    /* [FIX] Non-blocking send */
     public void sendRaw(String msg) {
         if (!connected || closed) return;
-        // Puts message in queue immediately and returns. 
-        // Writer thread handles the I/O.
         writeQueue.offer(msg);
     }
 
@@ -178,7 +170,6 @@ public class NetworkClient {
         closed = true;
         connected = false;
         
-        // Interrupt threads to unblock waiting states
         try { if (heartbeatThread != null) heartbeatThread.interrupt(); } catch(Exception e){}
         try { if (readerThread != null) readerThread.interrupt(); } catch(Exception e){}
         try { if (writerThread != null) writerThread.interrupt(); } catch(Exception e){}

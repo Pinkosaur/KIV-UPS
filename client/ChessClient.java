@@ -154,16 +154,14 @@ public class ChessClient {
         frame.setVisible(false); 
         frame.dispose();
         
-        // [FIX 2] Send Resign if in game to trigger "Opponent Resigned" instead of disconnect timeout
         final boolean inGame = (gamePanel != null && !gamePanel.isGameEnded() && 
                                ((CardLayout)cards.getLayout()).toString().contains(CARD_GAME)); 
-        // Note: Checking layout state reliably is hard, better to rely on game panel state
         
         new Thread(() -> {
             NetworkClient nc = this.networkClient;
             if (nc != null) {
                 try { 
-                    /* If we are in a game, Resign first so opponent gets instant win */
+                    /* [FIX] Resign if in game for polite exit */
                     if (!gamePanel.isGameEnded()) {
                         nc.sendRaw(Protocol.CMD_RES);
                         Thread.sleep(50); 
@@ -182,12 +180,10 @@ public class ChessClient {
     }
 
     private void switchToLobby() {
-        /* [FIX 1] Block lobby switch if end overlay is visible */
         if (resultOverlay.isEndOverlayShown()) {
             pendingLobbyReturn = true;
             return; 
         }
-        
         pendingLobbyReturn = false; 
         waitingPanel.stopAnimation();
         lobbyTimer.start();
@@ -198,7 +194,6 @@ public class ChessClient {
 
     private void onOverlayContinueClicked() {
         resultOverlay.hideOverlay();
-        /* [FIX 1] Now safe to switch */
         switchToLobby();
     }
 
@@ -238,7 +233,17 @@ public class ChessClient {
         this.networkClient = new NetworkClient(createNetworkListener());
         final NetworkClient clientRef = this.networkClient; 
         
-        Thread t = new Thread(() -> clientRef.connect(serverHost, serverPort, clientName));
+        Thread t = new Thread(() -> {
+            try {
+                clientRef.connect(serverHost, serverPort, clientName);
+            } catch (IOException e) {
+                // Should be handled by listener onNetworkError ideally, but since we are initiating:
+                SwingUtilities.invokeLater(() -> {
+                    JOptionPane.showMessageDialog(frame, "Connection failed: " + e.getMessage(), "Error", JOptionPane.ERROR_MESSAGE);
+                    exitToWelcome();
+                });
+            }
+        });
         t.setDaemon(true);
         t.start();
     }
@@ -273,7 +278,6 @@ public class ChessClient {
     private void attemptReconnect() {
         if (isReconnecting || intentionalDisconnect) return;
         
-        /* [FIX 4] If we never connected (Server Down), show error dialog and exit immediately */
         if (!connectionEstablished) {
             JOptionPane.showMessageDialog(frame, "Could not connect to server.", "Connection Error", JOptionPane.ERROR_MESSAGE);
             exitToWelcome();
@@ -300,7 +304,6 @@ public class ChessClient {
                 NetworkClient newNc = new NetworkClient(createNetworkListener());
                 networkClient = newNc;
                 
-                /* This blocks until connected or throws exception */
                 newNc.connect(serverHost, serverPort, clientName);
                 
                 SwingUtilities.invokeLater(() -> {
@@ -312,7 +315,6 @@ public class ChessClient {
                 SwingUtilities.invokeLater(() -> {
                     d.dispose();
                     isReconnecting = false;
-                    /* [FIX 4] Don't loop if server is definitely gone */
                     JOptionPane.showMessageDialog(frame, "Connection lost. Server unavailable.", "Error", JOptionPane.ERROR_MESSAGE);
                     exitToWelcome();
                 });
@@ -337,9 +339,12 @@ public class ChessClient {
     private void parseServerMessage(String msg) {
         String u = msg.trim();
         
-        /* [FIX 3] Handle Kick Message */
+        /* [FIX] Handle Kick: Close any waiting popups too */
         if (u.equals("OPP_KICK")) {
-             showEnd(true, "Opponent was kicked due to illegal input");
+             SwingUtilities.invokeLater(() -> {
+                 closeDisconnectPopup();
+                 showEnd(true, "Opponent was kicked due to illegal input");
+             });
              return;
         }
 
@@ -408,7 +413,6 @@ public class ChessClient {
         }
 
         if (u.startsWith(Protocol.RESP_LOBBY)) {
-            /* [FIX 1] Check overlay status before switching */
             if (resultOverlay.isEndOverlayShown()) {
                 pendingLobbyReturn = true;
                 return;
