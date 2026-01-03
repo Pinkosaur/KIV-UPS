@@ -5,6 +5,10 @@ import java.awt.event.ActionListener;
 public class WaitingPanel extends JPanel {
     private final Timer timer;
     private int angle = 0;
+    
+    // [FIX] Pre-allocate constants
+    private static final Color TRACK_COLOR = new Color(80, 80, 80);
+    private static final Stroke TRACK_STROKE = new BasicStroke(4);
 
     public WaitingPanel(ActionListener onCancel) {
         setLayout(new BorderLayout());
@@ -29,13 +33,8 @@ public class WaitingPanel extends JPanel {
         });
     }
 
-    public void startAnimation() {
-        timer.start();
-    }
-
-    public void stopAnimation() {
-        timer.stop();
-    }
+    public void startAnimation() { timer.start(); }
+    public void stopAnimation() { timer.stop(); }
 
     @Override
     protected void paintComponent(Graphics g) {
@@ -47,12 +46,11 @@ public class WaitingPanel extends JPanel {
         int cx = getWidth() / 2;
         int cy = getHeight() / 2;
         
-        // Draw static circle track (optional, looks nicer)
-        g2.setColor(new Color(80, 80, 80));
-        g2.setStroke(new BasicStroke(4));
+        // [FIX] Use constants
+        g2.setColor(TRACK_COLOR);
+        g2.setStroke(TRACK_STROKE);
         g2.drawOval(cx - r, cy - r, 2 * r, 2 * r);
 
-        // Draw spinning arc
         g2.setColor(Color.WHITE);
         g2.drawArc(cx - r, cy - r, 2 * r, 2 * r, -angle, 120);
     }

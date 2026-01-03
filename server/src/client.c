@@ -66,9 +66,19 @@ void send_error(Client *c, const char *reason) {
 int handle_protocol_error(Client *me, const char *msg) {
     me->error_count++;
     log_printf("[CLIENT %s] Protocol/Logic Error %d/%d: %s\n", me->name, me->error_count, MAX_ERRORS, msg);
+    
     if (me->error_count >= MAX_ERRORS) {
         send_error(me, "Too many invalid messages. Disconnecting.");
-        return 1; 
+        
+        /* [FIX 3] Notify opponent about the kick before disconnecting */
+        if (me->match && !me->match->finished) {
+            Client *opp = (me->match->white == me) ? me->match->black : me->match->white;
+            if (opp && opp->sock > 0) {
+                send_fmt_with_seq(opp, "OPP_KICK"); /* New command */
+            }
+        }
+        
+        return 1; /* Disconnect */
     }
     send_error(me, msg);
     return 0;

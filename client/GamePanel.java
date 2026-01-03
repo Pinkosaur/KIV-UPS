@@ -105,6 +105,10 @@ public class GamePanel extends JPanel {
         add(ctrl, BorderLayout.SOUTH);
     }
 
+    public boolean isGameEnded() {
+        return gameEnded;
+    }
+
     public void initGame(int color, boolean isTurn) {
         this.myColor = color;
         this.myTurn = isTurn;

@@ -5,6 +5,8 @@ import java.io.OutputStreamWriter;
 import java.io.PrintWriter;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
+import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.LinkedBlockingQueue;
 
 public class NetworkClient {
     public interface NetworkListener {
@@ -18,13 +20,17 @@ public class NetworkClient {
     private Socket socket;
     private BufferedReader in;
     private PrintWriter out;
-    private Thread readerThread;
     
-    // Heartbeat components
+    private Thread readerThread;
     private Thread heartbeatThread;
+    
+    /* [FIX] Writer thread components */
+    private Thread writerThread;
+    private final BlockingQueue<String> writeQueue = new LinkedBlockingQueue<>();
+    
     private volatile long lastRxTime = 0;
-    private static final long HEARTBEAT_INTERVAL = 2000; // Send PING every 2s
-    private static final long READ_TIMEOUT = 10000;      // Die if no data for 10s
+    private static final long HEARTBEAT_INTERVAL = 2000; 
+    private static final long READ_TIMEOUT = 10000;      
 
     private volatile boolean closed = false;
     private volatile boolean connected = false;
@@ -46,7 +52,7 @@ public class NetworkClient {
             out = new PrintWriter(new OutputStreamWriter(socket.getOutputStream(), StandardCharsets.UTF_8), true);
 
             connected = true;
-            lastRxTime = System.currentTimeMillis(); // Init timer
+            lastRxTime = System.currentTimeMillis(); 
 
             // 1. Reader Thread
             readerThread = new Thread(this::readLoop);
@@ -57,10 +63,14 @@ public class NetworkClient {
             heartbeatThread = new Thread(this::heartbeatLoop);
             heartbeatThread.setDaemon(true);
             heartbeatThread.start();
+            
+            // 3. [FIX] Writer Thread
+            writerThread = new Thread(this::writeLoop);
+            writerThread.setDaemon(true);
+            writerThread.start();
 
             if (listener != null) listener.onConnected();
             
-            // Handshake
             sendRaw("HELLO " + clientName);
 
         } catch (IOException ex) {
@@ -69,34 +79,45 @@ public class NetworkClient {
         }
     }
     
-    // Sends PINGs and checks for Timeouts
+    /* [FIX] Background Write Loop */
+    private void writeLoop() {
+        while (connected && !closed) {
+            try {
+                // Blocks until message available
+                String msg = writeQueue.take();
+                if (out != null) {
+                    out.println(msg);
+                    if (out.checkError()) throw new IOException("Write failed");
+                }
+            } catch (InterruptedException e) {
+                // Thread interrupted on close
+                break;
+            } catch (IOException e) {
+                if (!closed) closeConnection();
+                break;
+            } catch (Exception e) {
+                e.printStackTrace();
+            }
+        }
+    }
+
     private void heartbeatLoop() {
         while (connected && !closed) {
             try {
                 Thread.sleep(HEARTBEAT_INTERVAL);
                 if (!connected) break;
 
-                // A. Check for timeout
                 long silence = System.currentTimeMillis() - lastRxTime;
                 if (silence > READ_TIMEOUT) {
                     System.err.println("Heartbeat timeout! No data for " + silence + "ms.");
-                    
-                    // FIX: Explicitly notify listener of disconnection before closing
-                    // This ensures the GUI starts the reconnection loop.
                     if (listener != null) listener.onDisconnected();
-                    
                     closeConnection(); 
                     break;
                 }
-
-                // B. Send PING
                 sendRaw("PING");
-
             } catch (InterruptedException e) {
                 break;
-            } catch (Exception e) {
-                // If writing fails, reader loop or error handler will catch it
-            }
+            } catch (Exception e) { }
         }
     }
 
@@ -104,57 +125,40 @@ public class NetworkClient {
         try {
             String rawLine;
             while ((rawLine = in.readLine()) != null) {
-                // Update heartbeat timestamp on ANY received data
                 lastRxTime = System.currentTimeMillis();
-
                 String line = rawLine.trim();
                 if (line.isEmpty()) continue;
-                
-                // Filter out the Heartbeat ACK so UI doesn't see it
-                if (line.equals("PNG")) {
-                    continue; 
-                }
+                if (line.equals("PNG")) continue; 
 
-                // Parse Protocol: MSG/SEQ
                 String payload = line;
                 int recvSeq = -1;
                 int lastSlash = line.lastIndexOf('/');
                 if (lastSlash > 0 && lastSlash < line.length() - 1) {
-                    String seqStr = line.substring(lastSlash + 1);
-                    boolean allDigits = true;
-                    for (int i = 0; i < seqStr.length(); ++i) {
-                        if (!Character.isDigit(seqStr.charAt(i))) { allDigits = false; break; }
-                    }
-                    if (allDigits) {
-                        try {
-                            recvSeq = Integer.parseInt(seqStr);
-                            payload = line.substring(0, lastSlash);
-                        } catch (NumberFormatException ignored) {}
-                    }
+                    try {
+                        String seqStr = line.substring(lastSlash + 1);
+                        recvSeq = Integer.parseInt(seqStr);
+                        payload = line.substring(0, lastSlash);
+                    } catch (NumberFormatException ignored) {}
                 }
 
                 try {
                     if (listener != null) listener.onServerMessage(payload, recvSeq);
                 } catch (Exception ex) { ex.printStackTrace(); }
             }
-            // EOF (Server closed connection cleanly)
             if (listener != null) listener.onDisconnected();
         } catch (IOException ex) {
-            // Socket error (Server crashed or network cut)
             if (!closed && listener != null) listener.onNetworkError(ex);
         } finally {
             safeCloseInternal();
         }
     }
     
+    /* [FIX] Non-blocking send */
     public void sendRaw(String msg) {
-        if (!connected || out == null) return;
-        try {
-            out.println(msg);
-            if (out.checkError()) throw new IOException("Write failed");
-        } catch (Exception e) {
-            closeConnection();
-        }
+        if (!connected || closed) return;
+        // Puts message in queue immediately and returns. 
+        // Writer thread handles the I/O.
+        writeQueue.offer(msg);
     }
 
     public void sendMove(String mv) {
@@ -173,10 +177,17 @@ public class NetworkClient {
         if (closed) return;
         closed = true;
         connected = false;
+        
+        // Interrupt threads to unblock waiting states
         try { if (heartbeatThread != null) heartbeatThread.interrupt(); } catch(Exception e){}
+        try { if (readerThread != null) readerThread.interrupt(); } catch(Exception e){}
+        try { if (writerThread != null) writerThread.interrupt(); } catch(Exception e){}
+        
         try { if (in != null) in.close(); } catch (Exception e) {}
         try { if (out != null) out.close(); } catch (Exception e) {}
         try { if (socket != null) socket.close(); } catch (Exception e) {}
+        
+        writeQueue.clear();
     }
     
     public boolean isConnected() { return connected; }
@@ -186,6 +197,5 @@ public class NetworkClient {
         try { if (in != null) in.close(); } catch (Throwable ignored) {}
         try { if (out != null) out.close(); } catch (Throwable ignored) {}
         try { if (socket != null) socket.close(); } catch (Throwable ignored) {}
-        try { if (readerThread != null) readerThread.interrupt(); } catch (Throwable ignored) {}
     }
 }
