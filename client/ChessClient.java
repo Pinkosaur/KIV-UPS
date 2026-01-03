@@ -23,8 +23,6 @@ public class ChessClient {
     private JLabel statusLabel;
     private JLabel timerLabel;
     private ResultOverlay resultOverlay;
-    
-    /* [FIX] Volatile to ensure background threads see the update immediately */
     private volatile NetworkClient networkClient;
     
     // Login UI
@@ -46,7 +44,6 @@ public class ChessClient {
     private String pendingFrom = null;
     private String pendingTo = null;
     private JDialog disconnectPopup = null;
-    
     private volatile boolean pendingLobbyReturn = false; 
 
     private static final String CARD_WELCOME = "welcome";
@@ -74,7 +71,6 @@ public class ChessClient {
             public void windowClosing(WindowEvent e) { handleDisconnectAndExit(); }
         });
 
-        // Initialize Panels
         lobbyPanel = new LobbyPanel(this);
         gamePanel = new GamePanel(this, imageManager);
         waitingPanel = new WaitingPanel(e -> {
@@ -82,7 +78,6 @@ public class ChessClient {
             switchToLobby();
         });
 
-        // Card Layout
         cards = new JPanel(new CardLayout());
         cards.add(createWelcomePanel(), CARD_WELCOME);
         cards.add(lobbyPanel, CARD_LOBBY);
@@ -91,7 +86,6 @@ public class ChessClient {
 
         frame.getContentPane().add(cards, BorderLayout.CENTER);
 
-        // Status Bar
         JPanel statusPanel = new JPanel(new BorderLayout());
         statusPanel.setBackground(new Color(40, 40, 40));
         statusPanel.setBorder(BorderFactory.createEmptyBorder(4, 12, 4, 12));
@@ -105,7 +99,6 @@ public class ChessClient {
         statusPanel.add(timerLabel, BorderLayout.EAST);
         frame.getContentPane().add(statusPanel, BorderLayout.NORTH);
 
-        // Overlay
         resultOverlay = new ResultOverlay(e -> onOverlayContinueClicked());
         frame.getLayeredPane().add(resultOverlay, JLayeredPane.MODAL_LAYER);
         frame.addComponentListener(new ComponentAdapter() {
@@ -113,7 +106,6 @@ public class ChessClient {
             public void componentShown(ComponentEvent e) { resizeOverlay(); }
         });
 
-        // Timers
         turnTimer = new Timer(1000, e -> {
             if (remainingSeconds > 0) {
                 remainingSeconds--;
@@ -138,29 +130,19 @@ public class ChessClient {
     }
 
     public void sendNetworkCommand(String cmd) {
-        // Safe access to volatile field
         NetworkClient nc = this.networkClient;
         if (nc != null) nc.sendRaw(cmd);
     }
 
-    /* Disconnects immediately on UI, cleans up network in background */
     public void disconnect() {
         intentionalDisconnect = true;
-        
-        // 1. Reset UI State immediately (EDT)
         exitToWelcome();
         statusLabel.setText("Disconnected");
-        
-        // 2. Capture reference and nullify field to prevent further usage
         NetworkClient nc = this.networkClient;
         this.networkClient = null; 
-        
-        // 3. Perform Network I/O in background to prevent freezing
         if (nc != null) {
             new Thread(() -> {
-                try {
-                    nc.sendRaw(Protocol.CMD_EXT); 
-                } catch (Exception ignored) {}
+                try { nc.sendRaw(Protocol.CMD_EXT); } catch (Exception ignored) {}
                 nc.closeConnection();
             }).start();
         }
@@ -171,8 +153,6 @@ public class ChessClient {
         closeDisconnectPopup();
         frame.setVisible(false); 
         frame.dispose();
-        
-        // Start cleanup in background
         new Thread(() -> {
             NetworkClient nc = this.networkClient;
             if (nc != null) {
@@ -181,8 +161,6 @@ public class ChessClient {
             }
             System.exit(0);
         }).start();
-
-        // Safety Net: Force exit if cleanup hangs
         new Thread(() -> {
             try { Thread.sleep(200); } catch (InterruptedException ignored) {}
             System.exit(0);
@@ -227,22 +205,20 @@ public class ChessClient {
     // --- Networking ---
 
     private void startConnection() {
-        // Handle cleanup of existing client OFF the EDT
         NetworkClient oldClient = this.networkClient;
         if (oldClient != null) {
-            this.networkClient = null; // Detach first
+            this.networkClient = null;
             new Thread(oldClient::closeConnection).start();
         }
 
         intentionalDisconnect = false;
         connectionEstablished = false; 
 
-        // [FIXED] Removed incorrect garbage code here.
-        // We create the listener, then the client, then start the thread.
+        // Initialize client but don't connect yet
         this.networkClient = new NetworkClient(createNetworkListener());
-        
         final NetworkClient clientRef = this.networkClient; 
         
+        // Spawn thread to connect
         Thread t = new Thread(() -> clientRef.connect(serverHost, serverPort, clientName));
         t.setDaemon(true);
         t.start();
@@ -254,19 +230,15 @@ public class ChessClient {
             
             public void onDisconnected() {
                 SwingUtilities.invokeLater(() -> {
-                    // Check if this event is from the active client
                     if (networkClient == null) return; 
-                    
                     if (!intentionalDisconnect && !isReconnecting) attemptReconnect();
                     else if (!isReconnecting && !intentionalDisconnect) exitToWelcome();
                 });
             }
             
             public void onServerMessage(String line, int seq) {
-                // Ensure we are handling the active client's messages
                 NetworkClient nc = networkClient;
                 if (nc == null) return;
-
                 if (seq >= 0) nc.syncSequenceFromReception(seq);
                 System.out.println("<< " + line);
                 parseServerMessage(line);
@@ -279,6 +251,7 @@ public class ChessClient {
         };
     }
 
+    /* [FIX] Synchronous reconnection logic to keep dialog open until success/failure */
     private void attemptReconnect() {
         if (isReconnecting || intentionalDisconnect) return;
         if (!connectionEstablished) {
@@ -289,12 +262,53 @@ public class ChessClient {
         isReconnecting = true;
         
         JDialog d = new JDialog(frame, "Reconnecting", true);
-        d.setSize(300,100); d.setLocationRelativeTo(frame);
+        d.setSize(300,100); 
+        d.setLocationRelativeTo(frame);
+        JPanel p = new JPanel(new BorderLayout());
+        p.add(new JLabel("Lost connection. Reconnecting...", SwingConstants.CENTER), BorderLayout.CENTER);
+        JButton cancel = new JButton("Cancel");
+        cancel.addActionListener(e -> { d.dispose(); exitToWelcome(); });
+        p.add(cancel, BorderLayout.SOUTH);
+        d.add(p);
+        
+        // Perform reconnection in background but keep dialog open
         new Thread(() -> {
-             startConnection();
-             SwingUtilities.invokeLater(() -> { d.dispose(); isReconnecting = false; });
+            try {
+                // Detach old
+                NetworkClient old = networkClient;
+                if (old != null) { networkClient = null; old.closeConnection(); }
+                
+                // Create new
+                NetworkClient newNc = new NetworkClient(createNetworkListener());
+                networkClient = newNc;
+                
+                // Connect SYNCHRONOUSLY here (we are already in bg thread)
+                // We use a modified connect logic or just wait?
+                // NetworkClient.connect is synchronous in logic but we wrapped it in thread in startConnection.
+                // Here we call it directly.
+                newNc.connect(serverHost, serverPort, clientName);
+                
+                SwingUtilities.invokeLater(() -> {
+                    d.dispose();
+                    isReconnecting = false;
+                    if (newNc.isConnected()) {
+                        statusLabel.setText("Reconnected!");
+                    } else {
+                        // Connect failed (likely IOException in connect())
+                        JOptionPane.showMessageDialog(frame, "Could not reconnect to server.", "Error", JOptionPane.ERROR_MESSAGE);
+                        exitToWelcome();
+                    }
+                });
+            } catch (Exception e) {
+                SwingUtilities.invokeLater(() -> {
+                    d.dispose();
+                    isReconnecting = false;
+                    exitToWelcome();
+                });
+            }
         }).start();
-        d.setVisible(true);
+        
+        d.setVisible(true); // Blocks until dispose() called
     }
 
     private void exitToWelcome() {
@@ -498,7 +512,6 @@ public class ChessClient {
     private JPanel createWelcomePanel() {
         JPanel welcome = new JPanel(new BorderLayout());
         
-        // Load BG if exists
         File f = new File(BACK_DIR, "chessboardbg.jpg");
         JLabel tempBg = null;
         if (f.exists()) {

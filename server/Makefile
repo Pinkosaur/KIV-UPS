@@ -1,5 +1,5 @@
 CC = gcc
-CFLAGS = -std=c11 -D_DEFAULT_SOURCE -O2 -Wall -Wextra -g -Iinclude
+CFLAGS = -std=c11 -D_DEFAULT_SOURCE -O2 -g -Iinclude
 LDFLAGS = -pthread
 
 SRCS = src/main.c src/client.c src/match.c src/game.c src/logging.c

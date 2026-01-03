@@ -1,9 +1,31 @@
+/* logging.c */
 #include <ifaddrs.h>
 #include <stdio.h>
 #include <string.h>
-#include <stdarg.h> /* Required for va_list */
-#include <time.h>   /* Required for timestamps */
+#include <stdarg.h> 
+#include <time.h>   
 #include "logging.h"
+
+/* Keep file open statically to avoid opening/closing on every write */
+static FILE *log_fp = NULL;
+
+/* Initialize logging: open file and disable buffering for crash safety */
+void init_logging(void) {
+    if (!log_fp) {
+        log_fp = fopen("server.log", "a");
+        /* Disable buffering (_IONBF) so logs are flushed to the OS immediately.
+           This ensures logs are preserved even if the application crashes/segfaults. */
+        if (log_fp) setvbuf(log_fp, NULL, _IONBF, 0); 
+    }
+}
+
+/* Optional clean up (called by OS on exit anyway, but good practice) */
+void close_logging(void) {
+    if (log_fp) {
+        fclose(log_fp);
+        log_fp = NULL;
+    }
+}
 
 /* Print all IPv4 interfaces and addresses on startup */
 void list_local_interfaces(void) {
@@ -51,7 +73,9 @@ int get_interface_name_for_addr(struct in_addr inaddr, char *ifname_out, size_t 
     return found;
 }
 
-/* printf wrapper that also appends to server.log with a timestamp */
+/* * printf wrapper that also appends to server.log with a timestamp.
+ * Uses the static log_fp for performance.
+ */
 void log_printf(const char *fmt, ...) {
     va_list args;
     
@@ -61,23 +85,24 @@ void log_printf(const char *fmt, ...) {
     va_end(args);
 
     /* 2. File Output */
-    FILE *fp = fopen("server.log", "a");
-    if (fp) {
+    /* Lazy initialization ensures it works even if init_logging wasn't called manually */
+    if (!log_fp) init_logging();
+    
+    if (log_fp) {
         /* Generate Timestamp */
         time_t now = time(NULL);
         struct tm *t = localtime(&now);
-        char time_str[64];
-        strftime(time_str, sizeof(time_str), "%Y-%m-%d %H:%M:%S", t);
+        char timebuf[64];
+        strftime(timebuf, sizeof(timebuf), "%Y-%m-%d %H:%M:%S", t);
         
         /* Write Timestamp */
-        fprintf(fp, "[%s] ", time_str);
-
+        fprintf(log_fp, "[%s] ", timebuf);
+        
         /* Write Message */
         va_start(args, fmt);
-        vfprintf(fp, fmt, args);
+        vfprintf(log_fp, fmt, args);
         va_end(args);
-
-        /* Ensure it closes to flush changes immediately */
-        fclose(fp);
+        
+        /* No explicit fflush/fclose needed here due to _IONBF */
     }
 }
