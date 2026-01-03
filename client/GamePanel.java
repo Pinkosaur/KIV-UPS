@@ -96,8 +96,11 @@ public class GamePanel extends JPanel {
         });
         
         drawBtn.addActionListener(e -> {
-            controller.sendNetworkCommand(Protocol.CMD_DRW_OFF);
-            drawBtn.setEnabled(false);
+            int ok = JOptionPane.showConfirmDialog(this, "Offer a draw to your opponent?", "Offer Draw", JOptionPane.YES_NO_OPTION);
+            if (ok == JOptionPane.YES_OPTION) {
+                controller.sendNetworkCommand(Protocol.CMD_DRW_OFF);
+                drawBtn.setEnabled(false);
+            }
         });
         
         ctrl.add(drawBtn);

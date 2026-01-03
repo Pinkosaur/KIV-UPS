@@ -1,5 +1,8 @@
 import javax.swing.*;
 import java.awt.*;
+import javax.imageio.ImageIO;
+import java.io.File;
+import java.io.IOException;
 
 public class LobbyPanel extends JPanel {
     private final DefaultListModel<String> roomListModel;
@@ -7,14 +10,25 @@ public class LobbyPanel extends JPanel {
     private final JButton btnJoinRoom;
     private final JButton btnCreateRoom;
     private final JButton btnRefreshRooms;
-    private final JButton btnDisconnect; // [NEW]
+    private final JButton btnDisconnect; 
     private final JButton btnExit;
     
     private String lastRoomListPayload = "";
+    
+    /* [FIX] Background Image support */
+    private Image bgImage = null;
 
     public LobbyPanel(ChessClient controller) {
         setLayout(new BorderLayout());
-        setBackground(new Color(60, 60, 60));
+        // setBackground(new Color(60, 60, 60)); // Removed solid bg
+        
+        /* [FIX] Load Background */
+        try {
+            bgImage = ImageIO.read(new File("backgrounds", "chessboardbg.jpg"));
+        } catch (Exception e) {
+            // fallback if missing
+            setBackground(new Color(60, 60, 60));
+        }
 
         JLabel title = new JLabel("LOBBY - Select a Room", SwingConstants.CENTER);
         title.setFont(new Font("SansSerif", Font.BOLD, 24));
@@ -26,8 +40,34 @@ public class LobbyPanel extends JPanel {
         roomList = new JList<>(roomListModel);
         roomList.setSelectionMode(ListSelectionModel.SINGLE_SELECTION);
         roomList.setFont(new Font("Monospaced", Font.PLAIN, 16));
+        
+        /* [FIX] Transparent List and ScrollPane */
+        roomList.setOpaque(false);
+        roomList.setBackground(new Color(0, 0, 0, 0)); // Fully transparent base, cell renderer handles text
+        roomList.setForeground(Color.WHITE);
+        
+        // Custom renderer to make text readable on bg
+        roomList.setCellRenderer(new DefaultListCellRenderer() {
+            @Override
+            public Component getListCellRendererComponent(JList<?> list, Object value, int index, boolean isSelected, boolean cellHasFocus) {
+                super.getListCellRendererComponent(list, value, index, isSelected, cellHasFocus);
+                setOpaque(true);
+                if (isSelected) {
+                    setBackground(list.getSelectionBackground());
+                    setForeground(list.getSelectionForeground());
+                } else {
+                    // Semi-transparent black for unselected items
+                    setBackground(new Color(0, 0, 0, 150));
+                    setForeground(Color.WHITE);
+                }
+                return this;
+            }
+        });
+
         JScrollPane scroll = new JScrollPane(roomList);
         scroll.setBorder(BorderFactory.createEmptyBorder(10, 50, 10, 50));
+        scroll.setOpaque(false);
+        scroll.getViewport().setOpaque(false);
         add(scroll, BorderLayout.CENTER);
 
         JPanel btnPanel = new JPanel(new FlowLayout(FlowLayout.CENTER, 20, 20));
@@ -36,7 +76,7 @@ public class LobbyPanel extends JPanel {
         btnCreateRoom = new JButton("Create New Room");
         btnJoinRoom = new JButton("Join Selected Room");
         btnRefreshRooms = new JButton("Refresh List");
-        btnDisconnect = new JButton("Disconnect"); // [NEW]
+        btnDisconnect = new JButton("Disconnect"); 
         btnExit = new JButton("Exit");
 
         // Action Listeners
@@ -51,9 +91,7 @@ public class LobbyPanel extends JPanel {
             }
         });
         
-        /* [NEW] Disconnect Action */
         btnDisconnect.addActionListener(e -> controller.disconnect());
-        
         btnExit.addActionListener(e -> controller.handleDisconnectAndExit());
 
         btnJoinRoom.setEnabled(false);
@@ -62,13 +100,24 @@ public class LobbyPanel extends JPanel {
         btnPanel.add(btnCreateRoom);
         btnPanel.add(btnJoinRoom);
         btnPanel.add(btnRefreshRooms);
-        btnPanel.add(btnDisconnect); // [NEW]
+        btnPanel.add(btnDisconnect); 
         btnPanel.add(btnExit);
         add(btnPanel, BorderLayout.SOUTH);
     }
+    
+    /* [FIX] Custom painting for background */
+    @Override
+    protected void paintComponent(Graphics g) {
+        super.paintComponent(g);
+        if (bgImage != null) {
+            g.drawImage(bgImage, 0, 0, getWidth(), getHeight(), this);
+        } else {
+            g.setColor(new Color(60, 60, 60));
+            g.fillRect(0, 0, getWidth(), getHeight());
+        }
+    }
 
     public void updateRoomList(String payload) {
-        // Optimization: prevent flicker if list hasn't changed
         if (payload.equals(lastRoomListPayload)) return;
         lastRoomListPayload = payload;
 
@@ -79,7 +128,6 @@ public class LobbyPanel extends JPanel {
                 String[] rooms = payload.split(" ");
                 for (String r : rooms) if (!r.isEmpty()) roomListModel.addElement(r);
             }
-            // Restore selection
             if (selectedVal != null && roomListModel.contains(selectedVal)) {
                 roomList.setSelectedValue(selectedVal, true);
             }

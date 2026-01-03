@@ -161,7 +161,6 @@ public class ChessClient {
             NetworkClient nc = this.networkClient;
             if (nc != null) {
                 try { 
-                    /* [FIX] Resign if in game for polite exit */
                     if (!gamePanel.isGameEnded()) {
                         nc.sendRaw(Protocol.CMD_RES);
                         Thread.sleep(50); 
@@ -237,7 +236,6 @@ public class ChessClient {
             try {
                 clientRef.connect(serverHost, serverPort, clientName);
             } catch (IOException e) {
-                // Should be handled by listener onNetworkError ideally, but since we are initiating:
                 SwingUtilities.invokeLater(() -> {
                     JOptionPane.showMessageDialog(frame, "Connection failed: " + e.getMessage(), "Error", JOptionPane.ERROR_MESSAGE);
                     exitToWelcome();
@@ -304,6 +302,8 @@ public class ChessClient {
                 NetworkClient newNc = new NetworkClient(createNetworkListener());
                 networkClient = newNc;
                 
+                Thread.sleep(1000);
+                
                 newNc.connect(serverHost, serverPort, clientName);
                 
                 SwingUtilities.invokeLater(() -> {
@@ -339,7 +339,6 @@ public class ChessClient {
     private void parseServerMessage(String msg) {
         String u = msg.trim();
         
-        /* [FIX] Handle Kick: Close any waiting popups too */
         if (u.equals("OPP_KICK")) {
              SwingUtilities.invokeLater(() -> {
                  closeDisconnectPopup();
@@ -413,11 +412,13 @@ public class ChessClient {
         }
 
         if (u.startsWith(Protocol.RESP_LOBBY)) {
-            if (resultOverlay.isEndOverlayShown()) {
-                pendingLobbyReturn = true;
-                return;
-            }
-            SwingUtilities.invokeLater(this::switchToLobby);
+            SwingUtilities.invokeLater(() -> {
+                if (resultOverlay.isEndOverlayShown()) {
+                    pendingLobbyReturn = true;
+                    return;
+                }
+                switchToLobby();
+            });
             return;
         }
 
@@ -551,6 +552,12 @@ public class ChessClient {
         welcomeLayer.setLayout(null);
         welcomeBg.setBounds(0, 0, 1600, 800);
         welcomeLayer.add(welcomeBg, JLayeredPane.DEFAULT_LAYER);
+        
+        /* [FIX] Add large WELCOME text */
+        JLabel welcomeTitle = new JLabel("WELCOME", SwingConstants.CENTER);
+        welcomeTitle.setFont(new Font("Serif", Font.BOLD, 100));
+        welcomeTitle.setForeground(new Color(255, 255, 255, 128)); // Semi-transparent white
+        welcomeLayer.add(welcomeTitle, JLayeredPane.PALETTE_LAYER);
 
         JPanel wc = new JPanel();
         wc.setOpaque(false);
@@ -594,6 +601,8 @@ public class ChessClient {
             public void componentResized(ComponentEvent e) {
                 welcomeBg.setBounds(0,0,welcome.getWidth(), welcome.getHeight());
                 welcomeLayer.setPreferredSize(welcome.getSize());
+                /* [FIX] Center the text on resize */
+                welcomeTitle.setBounds(0, 0, welcome.getWidth(), welcome.getHeight() - 200); // Leave room for controls
             }
         });
         welcome.add(welcomeLayer, BorderLayout.CENTER);
