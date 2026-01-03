@@ -13,20 +13,19 @@ public class LobbyPanel extends JPanel {
     private final JButton btnDisconnect; 
     private final JButton btnExit;
     
-    private String lastRoomListPayload = "";
+    // Components for the "List" vs "Empty" switching
+    private final JPanel centerContainer; 
+    private final CardLayout centerLayout;
     
-    /* [FIX] Background Image support */
+    private String lastRoomListPayload = "";
     private Image bgImage = null;
 
     public LobbyPanel(ChessClient controller) {
         setLayout(new BorderLayout());
-        // setBackground(new Color(60, 60, 60)); // Removed solid bg
         
-        /* [FIX] Load Background */
         try {
             bgImage = ImageIO.read(new File("backgrounds", "chessboardbg.jpg"));
         } catch (Exception e) {
-            // fallback if missing
             setBackground(new Color(60, 60, 60));
         }
 
@@ -36,28 +35,33 @@ public class LobbyPanel extends JPanel {
         title.setBorder(BorderFactory.createEmptyBorder(20, 0, 20, 0));
         add(title, BorderLayout.NORTH);
 
+        // --- Center Area: CardLayout to swap between List and Empty Message ---
+        centerLayout = new CardLayout();
+        centerContainer = new JPanel(centerLayout);
+        centerContainer.setOpaque(false); // Let main background show through
+        
+        // 1. The List View (wrapped in a dark semi-transparent panel for readability)
+        DarkPanel listBackground = new DarkPanel();
+        listBackground.setLayout(new BorderLayout());
+        
         roomListModel = new DefaultListModel<>();
         roomList = new JList<>(roomListModel);
         roomList.setSelectionMode(ListSelectionModel.SINGLE_SELECTION);
         roomList.setFont(new Font("Monospaced", Font.PLAIN, 16));
-        
-        /* [FIX] Transparent List and ScrollPane */
-        roomList.setOpaque(false);
-        roomList.setBackground(new Color(0, 0, 0, 0)); // Fully transparent base, cell renderer handles text
+        roomList.setOpaque(false); // Transparent so it shows the DarkPanel background
+        roomList.setBackground(new Color(0,0,0,0));
         roomList.setForeground(Color.WHITE);
         
-        // Custom renderer to make text readable on bg
+        // Simple white text renderer (background handled by container)
         roomList.setCellRenderer(new DefaultListCellRenderer() {
             @Override
             public Component getListCellRendererComponent(JList<?> list, Object value, int index, boolean isSelected, boolean cellHasFocus) {
                 super.getListCellRendererComponent(list, value, index, isSelected, cellHasFocus);
-                setOpaque(true);
+                setOpaque(isSelected); // Only paint background if selected
                 if (isSelected) {
-                    setBackground(list.getSelectionBackground());
-                    setForeground(list.getSelectionForeground());
+                    setBackground(new Color(0, 100, 200)); // Blue selection
+                    setForeground(Color.WHITE);
                 } else {
-                    // Semi-transparent black for unselected items
-                    setBackground(new Color(0, 0, 0, 150));
                     setForeground(Color.WHITE);
                 }
                 return this;
@@ -65,11 +69,32 @@ public class LobbyPanel extends JPanel {
         });
 
         JScrollPane scroll = new JScrollPane(roomList);
-        scroll.setBorder(BorderFactory.createEmptyBorder(10, 50, 10, 50));
+        scroll.setBorder(BorderFactory.createEmptyBorder());
         scroll.setOpaque(false);
         scroll.getViewport().setOpaque(false);
-        add(scroll, BorderLayout.CENTER);
+        
+        listBackground.add(scroll, BorderLayout.CENTER);
+        
+        // 2. The Empty View (also wrapped in dark panel)
+        DarkPanel emptyBackground = new DarkPanel();
+        emptyBackground.setLayout(new GridBagLayout()); // Center the label
+        JLabel emptyLabel = new JLabel("No room available at the moment.");
+        emptyLabel.setFont(new Font("SansSerif", Font.ITALIC, 18));
+        emptyLabel.setForeground(new Color(220, 220, 220));
+        emptyBackground.add(emptyLabel);
 
+        // Add both to card container
+        centerContainer.add(listBackground, "LIST");
+        centerContainer.add(emptyBackground, "EMPTY");
+        
+        // Add container to main panel with margins
+        JPanel centerWrapper = new JPanel(new BorderLayout());
+        centerWrapper.setOpaque(false);
+        centerWrapper.setBorder(BorderFactory.createEmptyBorder(10, 50, 10, 50));
+        centerWrapper.add(centerContainer, BorderLayout.CENTER);
+        add(centerWrapper, BorderLayout.CENTER);
+
+        // --- Controls ---
         JPanel btnPanel = new JPanel(new FlowLayout(FlowLayout.CENTER, 20, 20));
         btnPanel.setOpaque(false);
 
@@ -79,7 +104,6 @@ public class LobbyPanel extends JPanel {
         btnDisconnect = new JButton("Disconnect"); 
         btnExit = new JButton("Exit");
 
-        // Action Listeners
         btnCreateRoom.addActionListener(e -> controller.sendNetworkCommand(Protocol.CMD_NEW));
         btnRefreshRooms.addActionListener(e -> controller.sendNetworkCommand(Protocol.CMD_LIST));
         
@@ -105,7 +129,6 @@ public class LobbyPanel extends JPanel {
         add(btnPanel, BorderLayout.SOUTH);
     }
     
-    /* [FIX] Custom painting for background */
     @Override
     protected void paintComponent(Graphics g) {
         super.paintComponent(g);
@@ -124,12 +147,30 @@ public class LobbyPanel extends JPanel {
         SwingUtilities.invokeLater(() -> {
             String selectedVal = roomList.getSelectedValue();
             roomListModel.clear();
-            if (!payload.equals("EMPTY") && !payload.isEmpty()) {
+            
+            boolean isEmpty = payload.equals("EMPTY") || payload.isEmpty();
+            
+            if (!isEmpty) {
                 String[] rooms = payload.split(" ");
-                for (String r : rooms) if (!r.isEmpty()) roomListModel.addElement(r);
+                boolean foundAny = false;
+                for (String r : rooms) {
+                    if (!r.isEmpty()) {
+                        roomListModel.addElement(r);
+                        foundAny = true;
+                    }
+                }
+                isEmpty = !foundAny;
             }
-            if (selectedVal != null && roomListModel.contains(selectedVal)) {
-                roomList.setSelectedValue(selectedVal, true);
+            
+            // Switch view based on content
+            if (isEmpty) {
+                centerLayout.show(centerContainer, "EMPTY");
+            } else {
+                centerLayout.show(centerContainer, "LIST");
+                // Restore selection if possible
+                if (selectedVal != null && roomListModel.contains(selectedVal)) {
+                    roomList.setSelectedValue(selectedVal, true);
+                }
             }
         });
     }
@@ -137,5 +178,24 @@ public class LobbyPanel extends JPanel {
     public void reset() {
         lastRoomListPayload = "";
         roomListModel.clear();
+        centerLayout.show(centerContainer, "EMPTY");
+    }
+    
+    /** * Helper Panel that paints a semi-transparent black background.
+     * This provides the "layer" between the text and the chessboard image.
+     */
+    private static class DarkPanel extends JPanel {
+        private static final Color SEMI_TRANSPARENT_BG = new Color(0, 0, 0, 150);
+        
+        public DarkPanel() {
+            setOpaque(false);
+        }
+        
+        @Override
+        protected void paintComponent(Graphics g) {
+            g.setColor(SEMI_TRANSPARENT_BG);
+            g.fillRect(0, 0, getWidth(), getHeight());
+            super.paintComponent(g);
+        }
     }
 }

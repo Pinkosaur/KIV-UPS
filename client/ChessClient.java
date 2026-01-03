@@ -9,6 +9,7 @@ public class ChessClient {
     private String serverHost = "127.0.0.1";
     private int serverPort = 10001;
     private static final String BACK_DIR = "backgrounds"; 
+    private int autoRefreshTime = 8000; // every 8s
     
     private String clientName;
     
@@ -113,7 +114,7 @@ public class ChessClient {
             }
         });
         
-        lobbyTimer = new Timer(5000, e -> sendNetworkCommand(Protocol.CMD_LIST));
+        lobbyTimer = new Timer(autoRefreshTime, e -> sendNetworkCommand(Protocol.CMD_LIST));
         lobbyTimer.setRepeats(true);
 
         frame.setPreferredSize(new Dimension(1100, 760));
