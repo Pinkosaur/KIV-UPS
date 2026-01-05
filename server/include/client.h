@@ -1,3 +1,4 @@
+/* client.h */
 #ifndef CLIENT_H
 #define CLIENT_H
 
@@ -52,11 +53,15 @@ typedef struct Client {
     int paired;
     Match *match;
     char client_addr[ADDR_LEN];
+    char id[ID_LEN];
     
     /* State Management */
     ClientState state;
     int seq;
     int error_count;
+    
+    /* [NEW] Limit Tracking Flag */
+    int is_counted; 
     
     pthread_mutex_t lock;
     time_t disconnect_time;
@@ -77,5 +82,10 @@ void trim_crlf(char *s);
 int parse_seq_number(const char *line);
 void strip_trailing_seq(char *buf);
 const char *ack_code_for_received(const char *cmd);
+void reject_connection(int sock);
+
+int get_online_players(void);
+void increment_player_count(void);
+void decrement_player_count(void);
 
 #endif /* CLIENT_H */

@@ -26,6 +26,7 @@ public class GamePanel extends JPanel {
     private Set<Point> highlighted = new HashSet<>();
     private boolean waitingForOk = false;
     private boolean gameEnded = false;
+    private boolean interactionEnabled = true;
     
     // King Check State
     private boolean kingInCheck = false;
@@ -137,6 +138,7 @@ public class GamePanel extends JPanel {
     }
     
     public void setControlsEnabled(boolean enabled) {
+        this.interactionEnabled = enabled;
         resignBtn.setEnabled(enabled);
         drawBtn.setEnabled(enabled);
     }
@@ -231,7 +233,7 @@ public class GamePanel extends JPanel {
     }
 
     private void onSquareClicked(int uiR, int uiC) {
-        if (waitingForOk || gameEnded) return;
+        if (waitingForOk || gameEnded || !interactionEnabled) return;
         
         int r = (myColor == 1) ? (7 - uiR) : uiR;
         int c = (myColor == 1) ? (7 - uiC) : uiC;

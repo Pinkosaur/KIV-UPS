@@ -7,6 +7,8 @@ import java.net.Socket;
 import java.nio.charset.StandardCharsets;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.LinkedBlockingQueue;
+import java.time.LocalTime;
+import java.time.format.DateTimeFormatter;
 
 public class NetworkClient {
     public interface NetworkListener {
@@ -34,16 +36,24 @@ public class NetworkClient {
     private volatile boolean connected = false;
     private final Object seqLock = new Object();
     private int seqOutbound = -1; 
+    
+    // [LOGGING] Formatter for timestamps
+    private final DateTimeFormatter timeFmt = DateTimeFormatter.ofPattern("HH:mm:ss.SSS");
 
     public NetworkClient(NetworkListener listener) {
         this.listener = listener;
     }
 
-    public synchronized void connect(String host, int port, String clientName) throws IOException {
+    private void log(String prefix, String msg) {
+        System.out.println("[" + LocalTime.now().format(timeFmt) + "] " + prefix + " " + msg);
+    }
+
+    public synchronized void connect(String host, int port, String clientName, String sessionID) throws IOException {
         if (connected) return;
         closed = false;
 
         try {
+            log("CONN", "Connecting to " + host + ":" + port + " as " + clientName);
             socket = new Socket(host, port);
             socket.setTcpNoDelay(true);
             in = new BufferedReader(new InputStreamReader(socket.getInputStream(), StandardCharsets.UTF_8));
@@ -66,11 +76,12 @@ public class NetworkClient {
 
             if (listener != null) listener.onConnected();
             
-            sendRaw("HELLO " + clientName);
+            sendRaw("HELLO " + clientName + " " + sessionID);
 
         } catch (IOException ex) {
+            log("ERR", "Connect failed: " + ex.getMessage());
             closeConnection();
-            throw ex; // Re-throw so ChessClient knows connect failed immediately
+            throw ex; 
         }
     }
     
@@ -79,8 +90,11 @@ public class NetworkClient {
             try {
                 String msg = writeQueue.take();
                 if (out != null) {
+                    // [LOGGING] Log exact outgoing string
+                    log("[RAW OUT]", msg);
+                    
                     out.println(msg);
-                    /* [FIX] If write fails, notify error BEFORE closing so logic knows it crashed */
+                    
                     if (out.checkError()) {
                         IOException ex = new IOException("Write failed (Broken Pipe)");
                         if (listener != null) listener.onNetworkError(ex);
@@ -120,6 +134,9 @@ public class NetworkClient {
         try {
             String rawLine;
             while ((rawLine = in.readLine()) != null) {
+                // [LOGGING] Log exact incoming string
+                log("[RAW IN ]", rawLine);
+
                 lastRxTime = System.currentTimeMillis();
                 String line = rawLine.trim();
                 if (line.isEmpty()) continue;
@@ -140,8 +157,10 @@ public class NetworkClient {
                     if (listener != null) listener.onServerMessage(payload, recvSeq);
                 } catch (Exception ex) { ex.printStackTrace(); }
             }
+            log("INFO", "Socket EOF (Server closed connection)");
             if (listener != null) listener.onDisconnected();
         } catch (IOException ex) {
+            log("ERR", "Read Error: " + ex.getMessage());
             if (!closed && listener != null) listener.onNetworkError(ex);
         } finally {
             safeCloseInternal();
@@ -167,6 +186,7 @@ public class NetworkClient {
 
     public synchronized void closeConnection() {
         if (closed) return;
+        log("INFO", "Closing connection...");
         closed = true;
         connected = false;
         

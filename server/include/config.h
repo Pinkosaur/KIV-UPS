@@ -12,6 +12,7 @@
 #define NAME_LEN 64
 #define ADDR_LEN 64
 #define RECV_SUFFIX_LEN 16
+#define ID_LEN 32
 
 /* Logic Constants */
 #define MAX_ERRORS 3
@@ -19,5 +20,6 @@
 #define DISCONNECT_TIMEOUT_SECONDS 60
 #define HEARTBEAT_TIMEOUT_SECONDS 15
 #define RECONNECT_WINDOW 60
+#define DISCONNECT_GRACE_PERIOD 3
 
 #endif /* CONFIG_H */

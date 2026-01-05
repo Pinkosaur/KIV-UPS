@@ -3,6 +3,9 @@ import java.awt.*;
 import java.awt.event.*;
 import java.io.File;
 import java.io.IOException;
+import java.util.UUID;
+import java.util.concurrent.ConcurrentLinkedQueue;
+
 import javax.imageio.ImageIO;
 
 public class ChessClient {
@@ -12,11 +15,20 @@ public class ChessClient {
     private int autoRefreshTime = 8000; // every 8s
     
     private String clientName;
+    private final String sessionID;
     
     // State
     private volatile boolean intentionalDisconnect = false;
     private volatile boolean isReconnecting = false;
     private volatile boolean connectionEstablished = false; 
+    private volatile boolean handshakeCompleted = false;
+    
+    // [NEW] Offline message queue
+    private final ConcurrentLinkedQueue<String> offlineQueue = new ConcurrentLinkedQueue<>();
+    
+    // Retry limits
+    private int reconnectAttempts = 0;
+    private static final int MAX_RECONNECT_ATTEMPTS = 5;
     
     // UI Components
     private JFrame frame;
@@ -30,6 +42,7 @@ public class ChessClient {
     private JTextField nameField;
     private JTextField serverIpField; 
     private JTextField serverPortField;
+    private JButton connectBtn; 
     
     // Sub-components
     private LobbyPanel lobbyPanel;
@@ -53,7 +66,8 @@ public class ChessClient {
     private static final String CARD_GAME = "game";
 
     public ChessClient() {
-        this.imageManager = new ImageManager("pieces"); 
+        this.imageManager = new ImageManager("pieces");
+        this.sessionID = UUID.randomUUID().toString().substring(0, 8);
     }
 
     public static void main(String[] args) {
@@ -132,7 +146,12 @@ public class ChessClient {
 
     public void sendNetworkCommand(String cmd) {
         NetworkClient nc = this.networkClient;
-        if (nc != null) nc.sendRaw(cmd);
+        // [CHANGED] If disconnected, queue the message instead of dropping it
+        if (nc != null && nc.isConnected()) {
+            nc.sendRaw(cmd);
+        } else {
+            offlineQueue.offer(cmd);
+        }
     }
 
     public void disconnect() {
@@ -154,9 +173,6 @@ public class ChessClient {
         closeDisconnectPopup();
         frame.setVisible(false); 
         frame.dispose();
-        
-        final boolean inGame = (gamePanel != null && !gamePanel.isGameEnded() && 
-                               ((CardLayout)cards.getLayout()).toString().contains(CARD_GAME)); 
         
         new Thread(() -> {
             NetworkClient nc = this.networkClient;
@@ -229,13 +245,15 @@ public class ChessClient {
 
         intentionalDisconnect = false;
         connectionEstablished = false; 
+        handshakeCompleted = false; 
+        offlineQueue.clear(); // Clear old queue on fresh connect
 
         this.networkClient = new NetworkClient(createNetworkListener());
         final NetworkClient clientRef = this.networkClient; 
         
         Thread t = new Thread(() -> {
             try {
-                clientRef.connect(serverHost, serverPort, clientName);
+                clientRef.connect(serverHost, serverPort, clientName, sessionID);
             } catch (IOException e) {
                 SwingUtilities.invokeLater(() -> {
                     JOptionPane.showMessageDialog(frame, "Connection failed: " + e.getMessage(), "Error", JOptionPane.ERROR_MESSAGE);
@@ -254,6 +272,18 @@ public class ChessClient {
             public void onDisconnected() {
                 SwingUtilities.invokeLater(() -> {
                     if (networkClient == null) return; 
+                    
+                    if (!handshakeCompleted) {
+                        if (!intentionalDisconnect) {
+                            JOptionPane.showMessageDialog(frame, 
+                                "Connection failed. The server might be full or unavailable.", 
+                                "Connection Error", 
+                                JOptionPane.ERROR_MESSAGE);
+                        }
+                        exitToWelcome();
+                        return;
+                    }
+
                     if (!intentionalDisconnect && !isReconnecting) attemptReconnect();
                     else if (!isReconnecting && !intentionalDisconnect) exitToWelcome();
                 });
@@ -277,6 +307,14 @@ public class ChessClient {
     private void attemptReconnect() {
         if (isReconnecting || intentionalDisconnect) return;
         
+        if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
+            SwingUtilities.invokeLater(() -> {
+                JOptionPane.showMessageDialog(frame, "Unable to reconnect after multiple attempts.", "Connection Failed", JOptionPane.ERROR_MESSAGE);
+                exitToWelcome();
+            });
+            return;
+        }
+        
         if (!connectionEstablished) {
             JOptionPane.showMessageDialog(frame, "Could not connect to server.", "Connection Error", JOptionPane.ERROR_MESSAGE);
             exitToWelcome();
@@ -284,16 +322,15 @@ public class ChessClient {
         }
         
         isReconnecting = true;
+        reconnectAttempts++;
         
-        JDialog d = new JDialog(frame, "Reconnecting", true);
-        d.setSize(300,100); 
-        d.setLocationRelativeTo(frame);
-        JPanel p = new JPanel(new BorderLayout());
-        p.add(new JLabel("Lost connection. Reconnecting...", SwingConstants.CENTER), BorderLayout.CENTER);
-        JButton cancel = new JButton("Cancel");
-        cancel.addActionListener(e -> { d.dispose(); exitToWelcome(); });
-        p.add(cancel, BorderLayout.SOUTH);
-        d.add(p);
+        SwingUtilities.invokeLater(() -> {
+            statusLabel.setText("Connection lost. Reconnecting (" + reconnectAttempts + "/" + MAX_RECONNECT_ATTEMPTS + ")...");
+            statusLabel.setForeground(Color.ORANGE);
+            /* [CHANGED] Do NOT disable game controls. 
+               This allows the user to make a move (queueing it) while reconnecting. */
+            if (lobbyPanel != null) lobbyPanel.setButtonsEnabled(false);
+        });
         
         new Thread(() -> {
             try {
@@ -303,26 +340,39 @@ public class ChessClient {
                 NetworkClient newNc = new NetworkClient(createNetworkListener());
                 networkClient = newNc;
                 
-                Thread.sleep(1000);
+                Thread.sleep(1000); 
                 
-                newNc.connect(serverHost, serverPort, clientName);
+                newNc.connect(serverHost, serverPort, clientName, sessionID);
                 
+                /* [NEW] Flush the offline queue immediately after connection/handshake initiation */
+                String queuedMsg;
+                while ((queuedMsg = offlineQueue.poll()) != null) {
+                    newNc.sendRaw(queuedMsg);
+                }
+
                 SwingUtilities.invokeLater(() -> {
-                    d.dispose();
                     isReconnecting = false;
-                    statusLabel.setText("Reconnected!");
+                    reconnectAttempts = 0; 
+                    statusLabel.setText("Connected as " + clientName);
+                    statusLabel.setForeground(Color.WHITE);
+                    // Ensure controls are enabled
+                    if (gamePanel != null && !gamePanel.isGameEnded()) gamePanel.setControlsEnabled(true);
+                    if (lobbyPanel != null) lobbyPanel.setButtonsEnabled(true);
+                    
+                    if (lobbyPanel.isShowing()) sendNetworkCommand(Protocol.CMD_LIST);
                 });
             } catch (Exception e) {
                 SwingUtilities.invokeLater(() -> {
-                    d.dispose();
-                    isReconnecting = false;
-                    JOptionPane.showMessageDialog(frame, "Connection lost. Server unavailable.", "Error", JOptionPane.ERROR_MESSAGE);
-                    exitToWelcome();
+                    isReconnecting = false; 
+                    if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
+                         JOptionPane.showMessageDialog(frame, "Server unavailable.", "Error", JOptionPane.ERROR_MESSAGE);
+                         exitToWelcome();
+                    } else {
+                         attemptReconnect(); 
+                    }
                 });
             }
         }).start();
-        
-        d.setVisible(true);
     }
 
     private void exitToWelcome() {
@@ -335,11 +385,35 @@ public class ChessClient {
         ((CardLayout)cards.getLayout()).show(cards, CARD_WELCOME);
         connectionEstablished = false;
         isReconnecting = false;
+        offlineQueue.clear(); 
+        
+        reconnectAttempts = 0; 
+        statusLabel.setText("Not connected");
+        statusLabel.setForeground(Color.WHITE);
+        if (connectBtn != null) connectBtn.setEnabled(true);
     }
 
     private void parseServerMessage(String msg) {
         String u = msg.trim();
         
+        if (u.equals(Protocol.RESP_FULL)) {
+            intentionalDisconnect = true; 
+            SwingUtilities.invokeLater(() -> {
+                JOptionPane.showMessageDialog(frame, 
+                    "The server is at maximum capacity. Please try again later.", 
+                    "Server Full", 
+                    JOptionPane.WARNING_MESSAGE);
+                exitToWelcome();
+            });
+            return;
+        }
+
+        if (reconnectAttempts > 0) reconnectAttempts = 0;
+
+        if (u.startsWith(Protocol.RESP_WELCOME)) {
+            handshakeCompleted = true;
+        }
+
         if (u.equals("OPP_KICK")) {
              SwingUtilities.invokeLater(() -> {
                  closeDisconnectPopup();
@@ -432,7 +506,9 @@ public class ChessClient {
             SwingUtilities.invokeLater(() -> {
                 lobbyTimer.stop();
                 ((CardLayout)cards.getLayout()).show(cards, CARD_WAITING);
-                statusLabel.setText("Hosting room... Waiting for opponent.");
+                
+                String roomInfo = u.substring(Protocol.RESP_WAITING.length()).trim();
+                statusLabel.setText("Hosting " + roomInfo + ". Waiting for opponent.");
                 waitingPanel.startAnimation();
             });
             return;
@@ -475,14 +551,30 @@ public class ChessClient {
         }
 
         if (u.startsWith(Protocol.RESP_ERR)) {
+            String errorMsg = u.substring(4);
+            if (errorMsg.contains("Server is full")) {
+                intentionalDisconnect = true;
+            }
             SwingUtilities.invokeLater(() -> {
-                JOptionPane.showMessageDialog(frame, "Server Error: " + u.substring(4));
+                JOptionPane.showMessageDialog(frame, "Server Error: " + errorMsg);
                 gamePanel.setWaitingForOk(false);
+                
+                if (errorMsg.contains("Server is full")) {
+                    intentionalDisconnect = true;
+                    exitToWelcome();
+                    return; 
+                }
+
+                if (waitingPanel.isShowing()) {
+                    switchToLobby();
+                }
+                if (lobbyPanel.isShowing()) {
+                    lobbyPanel.setButtonsEnabled(true);
+                }
             });
             return;
         }
 
-        // End Game / Draw Logic
         boolean isGameEnd = false;
         if (u.startsWith(Protocol.RESP_WIN_CHKM)) { showEnd(true, "Checkmate"); isGameEnd = true; }
         else if (u.startsWith(Protocol.RESP_CHKM)) { showEnd(false, "Checkmate"); isGameEnd = true; }
@@ -532,7 +624,6 @@ public class ChessClient {
         });
     }
 
-    // -- Welcome Panel --
     private JPanel createWelcomePanel() {
         JPanel welcome = new JPanel(new BorderLayout());
         
@@ -554,10 +645,9 @@ public class ChessClient {
         welcomeBg.setBounds(0, 0, 1600, 800);
         welcomeLayer.add(welcomeBg, JLayeredPane.DEFAULT_LAYER);
         
-        /* [FIX] Add large WELCOME text */
         JLabel welcomeTitle = new JLabel("WELCOME", SwingConstants.CENTER);
         welcomeTitle.setFont(new Font("Serif", Font.BOLD, 100));
-        welcomeTitle.setForeground(new Color(255, 255, 255, 128)); // Semi-transparent white
+        welcomeTitle.setForeground(new Color(255, 255, 255, 128)); 
         welcomeLayer.add(welcomeTitle, JLayeredPane.PALETTE_LAYER);
 
         JPanel wc = new JPanel();
@@ -582,15 +672,17 @@ public class ChessClient {
         portRow.add(serverPortField);
         wc.add(portRow);
 
-        JButton connectBtn = new JButton("Connect to Server");
+        connectBtn = new JButton("Connect to Server");
         connectBtn.setAlignmentX(Component.CENTER_ALIGNMENT);
         connectBtn.addActionListener(e -> {
             serverHost = serverIpField.getText();
             try { serverPort = Integer.parseInt(serverPortField.getText()); } catch(Exception ignore){}
             clientName = nameField.getText();
-            ((CardLayout)cards.getLayout()).show(cards, CARD_LOBBY);
+            
+            // Disable immediately
+            connectBtn.setEnabled(false);
             statusLabel.setText("Connecting...");
-            lobbyTimer.start();
+            
             startConnection();
         });
         
@@ -602,8 +694,7 @@ public class ChessClient {
             public void componentResized(ComponentEvent e) {
                 welcomeBg.setBounds(0,0,welcome.getWidth(), welcome.getHeight());
                 welcomeLayer.setPreferredSize(welcome.getSize());
-                /* [FIX] Center the text on resize */
-                welcomeTitle.setBounds(0, 0, welcome.getWidth(), welcome.getHeight() - 200); // Leave room for controls
+                welcomeTitle.setBounds(0, 0, welcome.getWidth(), welcome.getHeight() - 200); 
             }
         });
         welcome.add(welcomeLayer, BorderLayout.CENTER);

@@ -26,6 +26,7 @@ public class Protocol {
     public static final String RESP_OK_MV = "OK_MV";
     public static final String RESP_OPP_MV = "OPP_MV";
     public static final String RESP_ERR = "ERR";
+    public static final String RESP_FULL = "FULL";
     
     // End game conditions
     public static final String RESP_WIN_CHKM = "WIN_CHKM";

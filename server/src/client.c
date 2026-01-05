@@ -15,11 +15,42 @@
 #include "config.h"
 
 extern int max_players;
+extern int max_rooms;
 static int current_players = 0;
 static pthread_mutex_t players_lock = PTHREAD_MUTEX_INITIALIZER;
 
-/* --- Protocol Helpers --- */
+int get_online_players(void) {
+    int count;
+    pthread_mutex_lock(&players_lock);
+    count = current_players;
+    pthread_mutex_unlock(&players_lock);
+    return count;
+}
 
+void increment_player_count(void) {
+    pthread_mutex_lock(&players_lock);
+    current_players++;
+    pthread_mutex_unlock(&players_lock);
+}
+
+void decrement_player_count(void) {
+    pthread_mutex_lock(&players_lock);
+    if (current_players > 0) current_players--;
+    pthread_mutex_unlock(&players_lock);
+}
+
+int try_reserve_slot(void) {
+    int success = 0;
+    pthread_mutex_lock(&players_lock);
+    if (max_players <= 0 || current_players < max_players) {
+        current_players++;
+        success = 1;
+    }
+    pthread_mutex_unlock(&players_lock);
+    return success;
+}
+
+/* --- Protocol Helpers --- */
 void send_raw(int sock, const char *msg) {
     if (sock > 0) send(sock, msg, strlen(msg), MSG_NOSIGNAL);
 }
@@ -50,7 +81,7 @@ void send_fmt_with_seq(Client *c, const char *fmt, ...) {
     size_t len = strlen(out);
     if (len > 0 && out[len-1] == '\n') out[len-1] = '\0';
     if (len > 128) log_printf("SENT -> %s : %.128s... (truncated)\n", c->name[0]?c->name:"unknown", out);
-    else log_printf("SENT -> %s : %s\n", c->name[0]?c->name:"unknown", out);
+    else log_printf("SENT -> %s (sock %d) : %s\n", c->name[0]?c->name:"unknown", c->sock, out);
 }
 
 void send_short_ack(Client *c, const char *ack_code, int recv_seq) {
@@ -112,48 +143,36 @@ const char *ack_code_for_received(const char *cmd) {
     return SM_ACK;
 }
 
-/* * [FIXED] Robust packet reader that handles TCP fragmentation and coalescing.
- * It maintains state (b_start, b_len) to consume the buffer byte-by-byte
- * and only calls recv() when the local buffer is empty.
- */
 int read_packet_wrapper(Client *me, char *readbuf, int *b_start, int *b_len, size_t *lp, char *linebuf, size_t linebuf_sz, int recv_flags) {
     while (1) {
-        /* Fetch more data if buffer is exhausted */
         if (*b_start >= *b_len) {
             *b_start = 0;
             *b_len = recv(me->sock, readbuf, BUFFER_SZ, recv_flags);
             
             if (*b_len < 0) {
-                if (errno == EAGAIN || errno == EWOULDBLOCK) return 0; // No data available (non-blocking)
-                return -1; // Socket error
+                if (errno == EAGAIN || errno == EWOULDBLOCK) return -2;
+                if (errno == EINTR) return -2; 
+                return -1; 
             }
-            if (*b_len == 0) return 0; // Connection closed
+            if (*b_len == 0) return 0;
             
             me->last_heartbeat = time(NULL);
         }
 
-        /* Process bytes from the buffer one by one */
         while (*b_start < *b_len) {
             char c = readbuf[(*b_start)++];
-            
             if (*lp + 1 < linebuf_sz) linebuf[(*lp)++] = c;
-            
             if (c == '\n') {
                 linebuf[*lp] = '\0';
                 trim_crlf(linebuf);
-                *lp = 0; // Reset line buffer for next command
-
-                /* Skip empty lines (keep-alives or stray newlines) */
+                *lp = 0; 
                 if (strlen(linebuf) == 0) continue;
-
                 if (strcmp(linebuf, "PING") == 0) {
                     send_line(me->sock, "PNG");
-                    continue; // Handled internally, get next command
+                    continue; 
                 }
-
                 int seq = parse_seq_number(linebuf);
                 strip_trailing_seq(linebuf);
-
                 if (seq >= 0) {
                     pthread_mutex_lock(&me->lock);
                     me->seq = seq;
@@ -162,75 +181,107 @@ int read_packet_wrapper(Client *me, char *readbuf, int *b_start, int *b_len, siz
                         send_short_ack(me, ack_code_for_received(linebuf), seq);
                     }
                 }
-                return 1; // Return 1 complete command
+                return 1; 
             }
         }
         
-        /* If we are here, we ran out of buffer data without finding a newline.
-           If non-blocking, return 0 to yield CPU. If blocking, loop back to recv. */
-        if (recv_flags & MSG_DONTWAIT) return 0;
+        if (recv_flags & MSG_DONTWAIT) return -2; 
     }
+}
+
+void reject_connection(int sock) {
+    const char *msg = "FULL\n";
+    send(sock, msg, strlen(msg), MSG_NOSIGNAL);
+    usleep(100000); 
+    close(sock);
 }
 
 int run_handshake(Client **me_ptr) {
     Client *me = *me_ptr;
-    char readbuf[BUFFER_SZ]; 
-    char linebuf[LINEBUF_SZ]; 
-    size_t lp = 0;
-    int b_start = 0, b_len = 0; /* [FIX] Buffer state vars */
+    char readbuf[BUFFER_SZ]; char linebuf[LINEBUF_SZ]; size_t lp = 0;
+    int b_start = 0, b_len = 0; 
 
     send_fmt_with_seq(me, "WELCOME ChessServer");
 
     while (me->state == STATE_HANDSHAKE) {
         int res = read_packet_wrapper(me, readbuf, &b_start, &b_len, &lp, linebuf, sizeof(linebuf), 0);
-        if (res == 0) return 0; 
-        if (res < 0) continue; 
+        if (res == 0 || res == -1) return 0;
+        if (res == -2) continue; 
 
         if (strncmp(linebuf, "HELLO ", 6) == 0) {
             char name[NAME_LEN];
-            strncpy(name, linebuf + 6, sizeof(name)-1);
-            name[sizeof(name)-1] = '\0';
+            char id[ID_LEN];
 
-            Client *old_session = match_reconnect(name, me->sock);
+            int args = sscanf(linebuf + 6, "%63s %31s", name, id);
+            if (args < 1) continue; 
+            if (args < 2) strncpy(id, "unknown", sizeof(id));
+
+            Client *old_session = NULL;
+            for (int retries = 0; retries < 5; retries++) {
+                old_session = match_reconnect(name, id, me->sock);
+                if (old_session) break;
+                usleep(100000); 
+            }
+
             if (old_session) {
-                log_printf("[CLIENT] Reconnect success.\n");
+                log_printf("[CLIENT] Reconnect success for %s.\n", name);
+                
                 pthread_mutex_destroy(&me->lock);
                 free(me);
                 me = old_session;
                 *me_ptr = me;
                 
                 send_short_ack(me, HELLO_ACK, me->seq);
-                match_try_resume(me->match);
                 
-                Client *opp = NULL;
-                if (me->match) opp = (me->match->white == me) ? me->match->black : me->match->white;
+                /* [CHANGED] Capture if we actually resumed from a paused state */
+                int was_paused = match_try_resume(me->match);
                 
-                send_fmt_with_seq(me, "RESUME %s %s", (opp&&opp->name[0])?opp->name:"Unknown", (me->color==0)?"white":"black");
-                if (opp && opp->sock > 0) send_fmt_with_seq(opp, "OPP_RESUME %s %s", me->name, (me->color==0)?"black":"white");
-                
-                if (me->match && me->match->moves_count > 0) {
-                    char history[BIG_BUFFER_SZ] = "";
-                    for(size_t j=0; j<me->match->moves_count; j++) {
-                        if (strlen(history) + strlen(me->match->moves[j]) + 2 < sizeof(history)) {
-                            strcat(history, me->match->moves[j]);
-                            strcat(history, " ");
-                        }
+                if (me->match && !me->paired) {
+                    me->state = STATE_WAITING;
+                    send_fmt_with_seq(me, "WAITING Room %d", me->match->id);
+                } else {
+                    me->state = STATE_GAME;
+                    Client *opp = (me->match->white == me) ? me->match->black : me->match->white;
+                    send_fmt_with_seq(me, "RESUME %s %s", (opp&&opp->name[0])?opp->name:"Unknown", (me->color==0)?"white":"black");
+                    
+                    /* [CHANGED] Only notify opponent if the game was actually paused (long disconnect) */
+                    if (opp && opp->sock > 0 && was_paused) {
+                        send_fmt_with_seq(opp, "OPP_RESUME %s %s", me->name, (me->color==0)?"black":"white");
                     }
-                    send_fmt_with_seq(me, "HISTORY %s", history);
+                    
+                    if (me->match && me->match->moves_count > 0) {
+                        char history[BIG_BUFFER_SZ] = "";
+                        for(size_t j=0; j<me->match->moves_count; j++) {
+                            if (strlen(history) + strlen(me->match->moves[j]) + 2 < sizeof(history)) {
+                                strcat(history, me->match->moves[j]);
+                                strcat(history, " ");
+                            }
+                        }
+                        send_fmt_with_seq(me, "HISTORY %s", history);
+                    }
+                    
+                    pthread_mutex_lock(&me->match->lock);
+                    int rem = match_get_remaining_time(me->match);
+                    pthread_mutex_unlock(&me->match->lock);
+                    send_fmt_with_seq(me, "TIME %d", rem);
+                    if (opp && opp->sock > 0) send_fmt_with_seq(opp, "TIME %d", rem);
                 }
-                
-                pthread_mutex_lock(&me->match->lock);
-                int rem = match_get_remaining_time(me->match);
-                pthread_mutex_unlock(&me->match->lock);
-                send_fmt_with_seq(me, "TIME %d", rem);
-                if (opp && opp->sock > 0) send_fmt_with_seq(opp, "TIME %d", rem);
 
-                if (me->match && !me->paired) me->state = STATE_WAITING;
-                else me->state = STATE_GAME;
                 return 1;
             }
 
+            if (!try_reserve_slot()) {
+                log_printf("[CLIENT] New connection rejected: Server Full.\n");
+                send_line(me->sock, "FULL"); 
+                usleep(200000); 
+                return 0; 
+            }
+            
+            me->is_counted = 1; 
+
             snprintf(me->name, sizeof(me->name), "%s", name);
+            snprintf(me->id, sizeof(me->id), "%s", id);
+
             send_short_ack(me, HELLO_ACK, me->seq);
             me->state = STATE_LOBBY;
             return 1;
@@ -242,108 +293,77 @@ int run_handshake(Client **me_ptr) {
 }
 
 int run_lobby(Client *me) {
-    char readbuf[BUFFER_SZ]; 
-    char linebuf[LINEBUF_SZ]; 
-    size_t lp = 0;
-    int b_start = 0, b_len = 0; /* [FIX] Buffer state vars */
+    char readbuf[BUFFER_SZ]; char linebuf[LINEBUF_SZ]; size_t lp = 0;
+    int b_start = 0, b_len = 0; 
 
-    me->match = NULL;
-    me->paired = 0;
-    me->color = -1;
-
+    me->match = NULL; me->paired = 0; me->color = -1;
     send_fmt_with_seq(me, "LOBBY (CMD: LIST, NEW, JOIN <id>)");
 
     while (me->state == STATE_LOBBY) {
         int res = read_packet_wrapper(me, readbuf, &b_start, &b_len, &lp, linebuf, sizeof(linebuf), 0);
-        if (res == 0) return 0;
-        if (res < 0) continue;
+        if (res == 0 || res == -1) return 0;
+        if (res == -2) continue;
 
         if (strcmp(linebuf, "LIST") == 0) {
             char *l = get_room_list_str();
             if (l) { send_fmt_with_seq(me, "ROOMLIST %s", l); free(l); }
         } 
         else if (strcmp(linebuf, "NEW") == 0) {
-            Match *m = match_create(me);
-            if (!m) send_error(me, "Server limit reached");
-            else {
-                me->match = m; 
-                me->color = 0;
-                send_fmt_with_seq(me, "WAITING Room %d", m->id);
-                me->state = STATE_WAITING;
+            if (max_rooms > 0 && get_active_room_count() >= max_rooms) {
+                send_error(me, "Server room limit reached");
+            } else {
+                Match *m = match_create(me);
+                if (!m) send_error(me, "Server internal limit reached");
+                else {
+                    me->match = m; 
+                    me->color = 0;
+                    send_fmt_with_seq(me, "WAITING Room %d", m->id);
+                    me->state = STATE_WAITING;
+                }
             }
         }
         else if (strncmp(linebuf, "JOIN ", 5) == 0) {
             int id = atoi(linebuf + 5);
-            Match *m = find_open_room(id);
-            if (!m) send_error(me, "Room full or closed");
-            else {
-                if (match_join(m, me) == 0) {
-                    me->match = m; 
-                    me->color = 1; 
-                    me->paired = 1; 
-                    m->white->paired = 1; 
-                    notify_start(m);
-                    me->state = STATE_GAME;
-                } else send_error(me, "Join failed");
-            }
+            if (match_join_by_id(id, me) == 0) {
+                Match *m = me->match; 
+                me->color = 1; me->paired = 1; 
+                if (m->white) m->white->paired = 1; 
+                notify_start(m);
+                me->state = STATE_GAME;
+            } else send_error(me, "Room full or closed");
         }
         else if (strcmp(linebuf, "EXT") == 0) { return 0; }
-        else if (strncmp(linebuf, "MV", 2)==0 || strncmp(linebuf, "RES", 3)==0 || 
-                 strncmp(linebuf, "DRW", 3)==0 || strncmp(linebuf, "TIME", 4)==0) {
+        else if (strncmp(linebuf, "MV", 2)==0 || strncmp(linebuf, "RES", 3)==0 || strncmp(linebuf, "DRW", 3)==0 || strncmp(linebuf, "TIME", 4)==0) {
              log_printf("Ignored stale game command from %s: %s\n", me->name, linebuf);
         }
-        else {
-            if (handle_protocol_error(me, "Unknown command")) return 0;
-        }
+        else { if (handle_protocol_error(me, "Unknown command")) return 0; }
     }
     return 1;
 }
 
 int run_waiting(Client *me) {
-    char readbuf[BUFFER_SZ]; 
-    char linebuf[LINEBUF_SZ]; 
-    size_t lp = 0;
-    int b_start = 0, b_len = 0; /* [FIX] Buffer state vars */
+    char readbuf[BUFFER_SZ]; char linebuf[LINEBUF_SZ]; size_t lp = 0;
+    int b_start = 0, b_len = 0; 
 
     while (me->state == STATE_WAITING) {
-        if (me->paired && me->match) {
-            me->state = STATE_GAME;
-            return 1;
-        }
+        if (me->paired && me->match) { me->state = STATE_GAME; return 1; }
         
-        /* Non-blocking read */
         int res = read_packet_wrapper(me, readbuf, &b_start, &b_len, &lp, linebuf, sizeof(linebuf), MSG_DONTWAIT);
         
         if (res > 0) {
             if (strstr(linebuf, "EXT")) {
                 if (me->match) {
-                    Match *m = me->match;
-                    pthread_mutex_lock(&m->lock);
-                    m->finished = 1;
-                    m->white = NULL;
-                    m->refs--;
-                    int last = (m->refs <= 0);
-                    pthread_mutex_unlock(&m->lock);
-                    if (last) match_free(m);
-                    me->match = NULL;
-                    me->color = -1;
+                    pthread_mutex_lock(&me->match->lock);
+                    me->match->finished = 1;
+                    pthread_mutex_unlock(&me->match->lock);
+                    
+                    match_leave_by_client(me); 
                 }
-                me->state = STATE_LOBBY;
-                return 1;
+                me->state = STATE_LOBBY; return 1;
             }
-            /* PING handled inside wrapper */
-        } else if (res == 0) {
-            /* No data, check connection health logic or just sleep */
-            /* If actually disconnected, wrapper handles returning 0 only on closed socket/error? 
-               Wait, our wrapper returns 0 for EAGAIN too.
-               We check b_len in wrapper. If read returns 0, wrapper returns 0.
-               We need to distinguish EOF from EAGAIN?
-               My wrapper returns 0 for EAGAIN. So we assume connection is live.
-               Is there a case where we return 0 for EOF? Yes.
-               This loop assumes 0 = no data (EAGAIN).
-               Ideally wrapper should return -2 for EAGAIN and 0 for EOF.
-               But for this simple server, checking error status inside wrapper or relying on heartbeat timeout is okay.
-            */
+        } 
+        else if (res == 0 || res == -1) { 
+            return 0; 
         }
         
         usleep(100000); 
@@ -355,42 +375,20 @@ int run_game(Client *me) {
     char readbuf[BUFFER_SZ]; 
     char linebuf[LINEBUF_SZ]; 
     size_t lp = 0;
-    int b_start = 0, b_len = 0; /* [FIX] Buffer state vars */
+    int b_start = 0, b_len = 0; 
     Match *myMatch = me->match;
 
     while (me->state == STATE_GAME) {
         int res = read_packet_wrapper(me, readbuf, &b_start, &b_len, &lp, linebuf, sizeof(linebuf), 0);
-        if (res == 0) return 0;
-        if (res < 0) {
-            if (myMatch && myMatch->finished) {
-                me->state = STATE_LOBBY;
-                return 1;
-            }
-            continue;
-        }
+        if (res == 0 || res == -1) return 0;
+        if (res == -2) continue; 
 
         pthread_mutex_lock(&myMatch->lock);
         if (myMatch->finished) {
             pthread_mutex_unlock(&myMatch->lock);
+            
+            match_leave_by_client(me);
             me->state = STATE_LOBBY;
-            /* [IMPORTANT] If we have extra commands in buffer (like LIST sent quickly),
-               returning 1 here means we carry over to run_lobby.
-               BUT readbuf is stack-allocated in run_game.
-               When we return, readbuf is lost. The bytes are lost.
-               This is why we still might see issues unless the buffer is moved to Client struct.
-               
-               HOWEVER: In the common case, the client sends nothing after game end until LOBBY is sent.
-               The user issue was LIST sent *immediately*.
-               If read_packet_wrapper returns 1 (processed LIST), we handle it in run_game loop?
-               Yes! The loop continues.
-               
-               If we process LIST here, we log "Ignored stale...".
-               Then we loop again.
-               Eventually we hit the "finished" check at the top of the loop and exit.
-               
-               So as long as we process the buffer *inside this loop*, we are fine.
-               The previous bug was recv() clobbering the buffer.
-            */
             return 1;
         }
 
@@ -484,7 +482,11 @@ int run_game(Client *me) {
             if (handle_protocol_error(me, "Unknown game command")) return 0;
         }
         
-        if (myMatch && myMatch->finished) me->state = STATE_LOBBY;
+        if (myMatch && myMatch->finished) {
+            match_leave_by_client(me);
+            me->state = STATE_LOBBY;
+            return 1;
+        }
     }
     return 1;
 }
@@ -496,11 +498,6 @@ void *client_worker(void *arg) {
 
     log_printf("[CLIENT %p] Worker started. Sock=%d.\n", me, me->sock);
     
-    pthread_mutex_lock(&players_lock);
-    current_players++;
-    pthread_mutex_unlock(&players_lock);
-
-    me->state = STATE_HANDSHAKE;
     me->last_heartbeat = time(NULL);
 
     while (me->state != STATE_DISCONNECTED) {
@@ -516,20 +513,22 @@ void *client_worker(void *arg) {
     }
 
     log_printf("[CLIENT %p] Entering disconnect sequence.\n", me);
+    int sock_to_close = me->sock;
     int persisted = match_release_after_client(me);
     
     if (persisted) {
         log_printf("[CLIENT %p] Client thread exited (Persisted). Closing sock %d.\n", me, me->sock);
-        if (me->sock > 0) { close(me->sock); me->sock = -1; }
+        if (sock_to_close> 0) close(sock_to_close);
+        /* Do NOT decrement. The slot is preserved. */
     } else {
         log_printf("[CLIENT %p] Client thread exited (Freeing).\n", me);
-        if (me->sock > 0) close(me->sock);
-        if (me) pthread_mutex_destroy(&me->lock);
+        if (sock_to_close > 0) close(sock_to_close);
+        if (me) {
+            if (me->is_counted) decrement_player_count();
+            pthread_mutex_destroy(&me->lock);
+        }
         free(me);
     }
     
-    pthread_mutex_lock(&players_lock);
-    current_players--;
-    pthread_mutex_unlock(&players_lock);
     return NULL;
 }

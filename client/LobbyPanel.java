@@ -13,7 +13,6 @@ public class LobbyPanel extends JPanel {
     private final JButton btnDisconnect; 
     private final JButton btnExit;
     
-    // Components for the "List" vs "Empty" switching
     private final JPanel centerContainer; 
     private final CardLayout centerLayout;
     
@@ -35,12 +34,11 @@ public class LobbyPanel extends JPanel {
         title.setBorder(BorderFactory.createEmptyBorder(20, 0, 20, 0));
         add(title, BorderLayout.NORTH);
 
-        // --- Center Area: CardLayout to swap between List and Empty Message ---
+        // --- Center Area ---
         centerLayout = new CardLayout();
         centerContainer = new JPanel(centerLayout);
-        centerContainer.setOpaque(false); // Let main background show through
+        centerContainer.setOpaque(false);
         
-        // 1. The List View (wrapped in a dark semi-transparent panel for readability)
         DarkPanel listBackground = new DarkPanel();
         listBackground.setLayout(new BorderLayout());
         
@@ -48,18 +46,17 @@ public class LobbyPanel extends JPanel {
         roomList = new JList<>(roomListModel);
         roomList.setSelectionMode(ListSelectionModel.SINGLE_SELECTION);
         roomList.setFont(new Font("Monospaced", Font.PLAIN, 16));
-        roomList.setOpaque(false); // Transparent so it shows the DarkPanel background
+        roomList.setOpaque(false);
         roomList.setBackground(new Color(0,0,0,0));
         roomList.setForeground(Color.WHITE);
         
-        // Simple white text renderer (background handled by container)
         roomList.setCellRenderer(new DefaultListCellRenderer() {
             @Override
             public Component getListCellRendererComponent(JList<?> list, Object value, int index, boolean isSelected, boolean cellHasFocus) {
                 super.getListCellRendererComponent(list, value, index, isSelected, cellHasFocus);
-                setOpaque(isSelected); // Only paint background if selected
+                setOpaque(isSelected);
                 if (isSelected) {
-                    setBackground(new Color(0, 100, 200)); // Blue selection
+                    setBackground(new Color(0, 100, 200));
                     setForeground(Color.WHITE);
                 } else {
                     setForeground(Color.WHITE);
@@ -75,19 +72,16 @@ public class LobbyPanel extends JPanel {
         
         listBackground.add(scroll, BorderLayout.CENTER);
         
-        // 2. The Empty View (also wrapped in dark panel)
         DarkPanel emptyBackground = new DarkPanel();
-        emptyBackground.setLayout(new GridBagLayout()); // Center the label
+        emptyBackground.setLayout(new GridBagLayout());
         JLabel emptyLabel = new JLabel("No room available at the moment.");
         emptyLabel.setFont(new Font("SansSerif", Font.ITALIC, 18));
         emptyLabel.setForeground(new Color(220, 220, 220));
         emptyBackground.add(emptyLabel);
 
-        // Add both to card container
         centerContainer.add(listBackground, "LIST");
         centerContainer.add(emptyBackground, "EMPTY");
         
-        // Add container to main panel with margins
         JPanel centerWrapper = new JPanel(new BorderLayout());
         centerWrapper.setOpaque(false);
         centerWrapper.setBorder(BorderFactory.createEmptyBorder(10, 50, 10, 50));
@@ -104,14 +98,24 @@ public class LobbyPanel extends JPanel {
         btnDisconnect = new JButton("Disconnect"); 
         btnExit = new JButton("Exit");
 
-        btnCreateRoom.addActionListener(e -> controller.sendNetworkCommand(Protocol.CMD_NEW));
-        btnRefreshRooms.addActionListener(e -> controller.sendNetworkCommand(Protocol.CMD_LIST));
+        // [FIX] Removed optimistic UI call. Waits for server.
+        btnCreateRoom.addActionListener(e -> {
+            setButtonsEnabled(false);
+            controller.sendNetworkCommand(Protocol.CMD_NEW);
+        });
+        
+        btnRefreshRooms.addActionListener(e -> {
+            controller.sendNetworkCommand(Protocol.CMD_LIST);
+        });
         
         btnJoinRoom.addActionListener(e -> {
             String sel = roomList.getSelectedValue();
             if (sel != null) {
                 String[] parts = sel.split(":");
-                if (parts.length > 0) controller.sendNetworkCommand(Protocol.CMD_JOIN + " " + parts[0]);
+                if (parts.length > 0) {
+                    setButtonsEnabled(false);
+                    controller.sendNetworkCommand(Protocol.CMD_JOIN + " " + parts[0]);
+                }
             }
         });
         
@@ -119,7 +123,11 @@ public class LobbyPanel extends JPanel {
         btnExit.addActionListener(e -> controller.handleDisconnectAndExit());
 
         btnJoinRoom.setEnabled(false);
-        roomList.addListSelectionListener(e -> btnJoinRoom.setEnabled(!roomList.isSelectionEmpty()));
+        roomList.addListSelectionListener(e -> {
+            if (btnCreateRoom.isEnabled()) {
+                btnJoinRoom.setEnabled(!roomList.isSelectionEmpty());
+            }
+        });
 
         btnPanel.add(btnCreateRoom);
         btnPanel.add(btnJoinRoom);
@@ -127,6 +135,12 @@ public class LobbyPanel extends JPanel {
         btnPanel.add(btnDisconnect); 
         btnPanel.add(btnExit);
         add(btnPanel, BorderLayout.SOUTH);
+    }
+    
+    public void setButtonsEnabled(boolean enabled) {
+        btnCreateRoom.setEnabled(enabled);
+        btnJoinRoom.setEnabled(enabled && !roomList.isSelectionEmpty());
+        btnRefreshRooms.setEnabled(enabled);
     }
     
     @Override
@@ -141,6 +155,8 @@ public class LobbyPanel extends JPanel {
     }
 
     public void updateRoomList(String payload) {
+        SwingUtilities.invokeLater(() -> setButtonsEnabled(true));
+
         if (payload.equals(lastRoomListPayload)) return;
         lastRoomListPayload = payload;
 
@@ -162,12 +178,10 @@ public class LobbyPanel extends JPanel {
                 isEmpty = !foundAny;
             }
             
-            // Switch view based on content
             if (isEmpty) {
                 centerLayout.show(centerContainer, "EMPTY");
             } else {
                 centerLayout.show(centerContainer, "LIST");
-                // Restore selection if possible
                 if (selectedVal != null && roomListModel.contains(selectedVal)) {
                     roomList.setSelectedValue(selectedVal, true);
                 }
@@ -179,11 +193,9 @@ public class LobbyPanel extends JPanel {
         lastRoomListPayload = "";
         roomListModel.clear();
         centerLayout.show(centerContainer, "EMPTY");
+        setButtonsEnabled(true);
     }
     
-    /** * Helper Panel that paints a semi-transparent black background.
-     * This provides the "layer" between the text and the chessboard image.
-     */
     private static class DarkPanel extends JPanel {
         private static final Color SEMI_TRANSPARENT_BG = new Color(0, 0, 0, 150);
         
