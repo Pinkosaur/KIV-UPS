@@ -1,4 +1,12 @@
 /* main.c */
+/**
+ * @file main.c
+ * @brief Server entry point.
+ *
+ * This file handles server configuration, socket initialization, and the main
+ * connection acceptance loop. It delegates client handling to separate threads.
+ */
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -14,16 +22,27 @@
 
 #define BACKLOG 10
 
-/* Global configuration limits */
+/* Global configuration limits (modified via command line args) */
 int max_rooms = -1;
 int max_players = -1;
 
+/**
+ * @brief Main function.
+ *
+ * Steps:
+ * 1. Initializes logging subsystem.
+ * 2. Parses command line arguments for IP, Port, and Limits.
+ * 3. Binds and listens on the TCP socket.
+ * 4. Enters an infinite loop to accept incoming connections.
+ * 5. Spawns a dedicated thread for each client.
+ */
 int main(int argc, char *argv[]) {
     init_logging();
     struct in_addr bind_addr;
     bind_addr.s_addr = htonl(INADDR_ANY);
     int port = DEFAULT_PORT;
 
+    /* Parse Command Line Arguments */
     for (int i = 1; i < argc; i++) {
         if (strncmp(argv[i], "ip=", 3) == 0) {
             const char *ip_str = argv[i] + 3;
@@ -44,6 +63,7 @@ int main(int argc, char *argv[]) {
         }
     }
     
+    /* Socket Setup */
     int srv = socket(AF_INET, SOCK_STREAM, 0);
     if (srv < 0) { perror("socket"); return 1; }
 
@@ -61,18 +81,21 @@ int main(int argc, char *argv[]) {
 
     log_printf("Server listening on port %d (Max Rooms: %d, Max Players: %d)\n", port, max_rooms, max_players);
 
+    /* Connection Acceptance Loop */
     while (1) {
         struct sockaddr_in cliaddr;
         socklen_t clilen = sizeof(cliaddr);
         int csock = accept(srv, (struct sockaddr *)&cliaddr, &clilen);
         if (csock < 0) continue;
 
+        /* Allocate Client Structure */
         Client *c = calloc(1, sizeof(Client));
         if (!c) { 
             close(csock); 
             continue; 
         }
 
+        /* Initialize Client State */
         c->sock = csock;
         c->color = -1;
         c->paired = 0;
@@ -88,11 +111,11 @@ int main(int argc, char *argv[]) {
         inet_ntop(AF_INET, &cliaddr.sin_addr, addrbuf, sizeof(addrbuf));
         snprintf(c->client_addr, sizeof(c->client_addr), "%s:%u", addrbuf, ntohs(cliaddr.sin_port));
 
+        /* Spawn Worker Thread */
         pthread_t tid;
         if (pthread_create(&tid, NULL, client_worker, c) != 0) {
             close(csock); 
             free(c);
-            /* No decrement needed because we didn't increment */
         } else {
             pthread_detach(tid);
         }

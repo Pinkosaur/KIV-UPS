@@ -3,17 +3,10 @@ import java.awt.*;
 import java.awt.event.ActionListener;
 
 /**
- * ResultOverlay: a reusable overlay component that covers the content area.
+ * ResultOverlay
  *
- * The original single-file client constructed overlayPanel + overlayColorPanel + inner UI.
- * This class implements the same UI and exposes:
- *   - showEndOverlay(isWinner, subtitle)
- *   - showNeutralOverlay(text)
- *   - hideOverlay()
- *
- * The Continue button's action is provided by the GUI via the constructor (so GUI can call exitToWelcome()).
- *
- * The overlay is sized by the caller (the GUI sets bounds on frame resize as in original).
+ * A transparent overlay component used to display end-of-game messages
+ * (Victory, Defeat, Draw) or important notifications over the game board.
  */
 public class ResultOverlay extends JPanel {
     private final JPanel overlayColorPanel;
@@ -60,7 +53,10 @@ public class ResultOverlay extends JPanel {
         setVisible(false);
     }
 
-    /** Show end overlay (colorized winner/loser) */
+    /**
+     * Shows a color-coded overlay indicating the game result.
+     * Blue for Victory, Red for Defeat.
+     */
     public void showEndOverlay(boolean isWinner, String subtitle) {
         endOverlayShown = true;
         if (isWinner) {
@@ -76,7 +72,9 @@ public class ResultOverlay extends JPanel {
         repaint();
     }
 
-    /** Show a neutral overlay (non-colored) */
+    /**
+     * Shows a neutral grey overlay for notifications or non-binary outcomes (Draw).
+     */
     public void showNeutralOverlay(String text) {
         if (endOverlayShown) return;
         endOverlayShown = true;
@@ -93,12 +91,10 @@ public class ResultOverlay extends JPanel {
         setVisible(false);
     }
 
-    /** Allow caller to check whether overlay is currently visible as an "end overlay" */
     public boolean isEndOverlayShown() {
         return endOverlayShown;
     }
 
-    /** Adjust the color-panel bounds to match parent content area; caller should set overlay bounds */
     public void setInnerBounds(int x, int y, int w, int h) {
         overlayColorPanel.setBounds(x, y, w, h);
     }

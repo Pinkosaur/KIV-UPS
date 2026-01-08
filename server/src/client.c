@@ -1,4 +1,13 @@
 /* src/client.c */
+/**
+ * @file client.c
+ * @brief Implementation of client thread management and protocol state machine.
+ *
+ * This file handles the lifecycle of a client connection, including the initial
+ * handshake, lobby interactions, matchmaking, and the gameplay loop. It manages
+ * concurrency via player counting and strictly adheres to the defined text-based protocol.
+ */
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -16,9 +25,18 @@
 
 extern int max_players;
 extern int max_rooms;
+
+/**
+ * Tracks the number of currently connected players (TCP connections or persisted sessions).
+ * Protected by players_lock.
+ */
 static int current_players = 0;
 static pthread_mutex_t players_lock = PTHREAD_MUTEX_INITIALIZER;
 
+/**
+ * @brief Retrieves the current number of online players in a thread-safe manner.
+ * @return The current player count.
+ */
 int get_online_players(void) {
     int count;
     pthread_mutex_lock(&players_lock);
@@ -27,18 +45,29 @@ int get_online_players(void) {
     return count;
 }
 
+/**
+ * @brief Increment the global player count.
+ */
 void increment_player_count(void) {
     pthread_mutex_lock(&players_lock);
     current_players++;
     pthread_mutex_unlock(&players_lock);
 }
 
+/**
+ * @brief Decrement the global player count.
+ * Safe to call even if count is zero (prevents underflow).
+ */
 void decrement_player_count(void) {
     pthread_mutex_lock(&players_lock);
     if (current_players > 0) current_players--;
     pthread_mutex_unlock(&players_lock);
 }
 
+/**
+ * @brief Atomically checks if there is space for a new player and increments the count.
+ * @return 1 if a slot was reserved, 0 if the server is full.
+ */
 int try_reserve_slot(void) {
     int success = 0;
     pthread_mutex_lock(&players_lock);
@@ -51,10 +80,21 @@ int try_reserve_slot(void) {
 }
 
 /* --- Protocol Helpers --- */
+
+/**
+ * @brief Sends raw bytes to a socket, ignoring SIGPIPE.
+ * @param sock The file descriptor of the socket.
+ * @param msg The null-terminated string to send.
+ */
 void send_raw(int sock, const char *msg) {
     if (sock > 0) send(sock, msg, strlen(msg), MSG_NOSIGNAL);
 }
 
+/**
+ * @brief Sends a string followed by a newline character to the socket.
+ * @param sock The file descriptor of the socket.
+ * @param msg The message string.
+ */
 void send_line(int sock, const char *msg) {
     if (sock <= 0) return;
     char tmp[BUFFER_SZ];
@@ -62,6 +102,15 @@ void send_line(int sock, const char *msg) {
     send_raw(sock, tmp);
 }
 
+/**
+ * @brief Formats a message, appends a sequence number, and sends it to the client.
+ * * This function handles the application-layer sequencing required by the protocol.
+ * It updates the client's sequence number and logs the outgoing message.
+ *
+ * @param c Pointer to the Client structure.
+ * @param fmt Printf-style format string.
+ * @param ... Arguments for the format string.
+ */
 void send_fmt_with_seq(Client *c, const char *fmt, ...) {
     if (!c || c->sock <= 0) return;
     char payload[BIG_BUFFER_SZ];
@@ -84,6 +133,12 @@ void send_fmt_with_seq(Client *c, const char *fmt, ...) {
     else log_printf("SENT -> %s (sock %d) : %s\n", c->name[0]?c->name:"unknown", c->sock, out);
 }
 
+/**
+ * @brief Sends a short acknowledgement code with the received sequence number.
+ * @param c Pointer to the Client structure.
+ * @param ack_code The protocol ACK code (e.g., "18", "OK").
+ * @param recv_seq The sequence number extracted from the received message.
+ */
 void send_short_ack(Client *c, const char *ack_code, int recv_seq) {
     if (!c || c->sock <= 0) return;
     char buf[64];
@@ -91,10 +146,23 @@ void send_short_ack(Client *c, const char *ack_code, int recv_seq) {
     send_line(c->sock, buf);
 }
 
+/**
+ * @brief Sends a formatted error message to the client.
+ * @param c Pointer to the Client structure.
+ * @param reason Description of the error.
+ */
 void send_error(Client *c, const char *reason) {
     send_fmt_with_seq(c, "ERR %s", reason);
 }
 
+/**
+ * @brief Logs a protocol error and checks if the client has exceeded the error threshold.
+ * * If the error count exceeds MAX_ERRORS, the client is disconnected and any active match is forfeited.
+ *
+ * @param me Pointer to the Client structure.
+ * @param msg Error description.
+ * @return 1 if the client was disconnected/kicked, 0 otherwise.
+ */
 int handle_protocol_error(Client *me, const char *msg) {
     me->error_count++;
     log_printf("[CLIENT %s] Protocol/Logic Error %d/%d: %s\n", me->name, me->error_count, MAX_ERRORS, msg);
@@ -118,6 +186,12 @@ int handle_protocol_error(Client *me, const char *msg) {
     return 0;
 }
 
+/**
+ * @brief Parses the sequence number from the end of a message string.
+ * Expects format ".../SEQ".
+ * @param line The received line.
+ * @return The sequence number (0-511) or -1 if invalid/missing.
+ */
 int parse_seq_number(const char *line) {
     if (!line) return -1;
     const char *p = strrchr(line, '/');
@@ -125,16 +199,28 @@ int parse_seq_number(const char *line) {
     return atoi(p+1) & 0x1FF;
 }
 
+/**
+ * @brief Removes the sequence suffix from the message buffer.
+ * Replaces the last '/' with a null terminator.
+ */
 void strip_trailing_seq(char *buf) {
     char *p = strrchr(buf, '/');
     if (p) *p = '\0';
 }
 
+/**
+ * @brief Removes trailing carriage return and newline characters.
+ */
 void trim_crlf(char *s) {
     size_t n = strlen(s);
     while (n > 0 && (s[n-1] == '\n' || s[n-1] == '\r')) s[--n] = '\0';
 }
 
+/**
+ * @brief Determines the appropriate ACK code for a received command.
+ * @param cmd The command string.
+ * @return String literal representing the ACK code.
+ */
 const char *ack_code_for_received(const char *cmd) {
     if (strncmp(cmd, "HELLO", 5) == 0) return HELLO_ACK;
     if (strncmp(cmd, "MV", 2) == 0) return "19"; 
@@ -143,8 +229,24 @@ const char *ack_code_for_received(const char *cmd) {
     return SM_ACK;
 }
 
+/**
+ * @brief Wrapper for reading packets that handles fragmentation and buffering.
+ * * This function reads from the socket into a persistence buffer, extracts complete lines,
+ * parses sequence numbers, and handles automatic PING/PONG responses.
+ *
+ * @param me Client structure.
+ * @param readbuf Raw buffer for recv calls.
+ * @param b_start Pointer to current start index in readbuf.
+ * @param b_len Pointer to current length of valid data in readbuf.
+ * @param lp Pointer to current length of linebuf.
+ * @param linebuf Buffer to assemble the current line.
+ * @param linebuf_sz Size of linebuf.
+ * @param recv_flags Flags for recv (e.g., MSG_DONTWAIT).
+ * @return 1 on successful line read, 0 on disconnect, -1 on fatal error, -2 on would block/retry.
+ */
 int read_packet_wrapper(Client *me, char *readbuf, int *b_start, int *b_len, size_t *lp, char *linebuf, size_t linebuf_sz, int recv_flags) {
     while (1) {
+        /* If buffer exhausted, read more from socket */
         if (*b_start >= *b_len) {
             *b_start = 0;
             *b_len = recv(me->sock, readbuf, BUFFER_SZ, recv_flags);
@@ -159,6 +261,7 @@ int read_packet_wrapper(Client *me, char *readbuf, int *b_start, int *b_len, siz
             me->last_heartbeat = time(NULL);
         }
 
+        /* Process buffer byte by byte */
         while (*b_start < *b_len) {
             char c = readbuf[(*b_start)++];
             if (*lp + 1 < linebuf_sz) linebuf[(*lp)++] = c;
@@ -167,10 +270,14 @@ int read_packet_wrapper(Client *me, char *readbuf, int *b_start, int *b_len, siz
                 trim_crlf(linebuf);
                 *lp = 0; 
                 if (strlen(linebuf) == 0) continue;
+                
+                /* Auto-handle Heartbeat */
                 if (strcmp(linebuf, "PING") == 0) {
                     send_line(me->sock, "PNG");
                     continue; 
                 }
+                
+                /* Process Sequence Number */
                 int seq = parse_seq_number(linebuf);
                 strip_trailing_seq(linebuf);
                 if (seq >= 0) {
@@ -189,6 +296,10 @@ int read_packet_wrapper(Client *me, char *readbuf, int *b_start, int *b_len, siz
     }
 }
 
+/**
+ * @brief Sends a rejection message and closes the socket.
+ * Used when the server is full or errors occur during connection.
+ */
 void reject_connection(int sock) {
     const char *msg = "FULL\n";
     send(sock, msg, strlen(msg), MSG_NOSIGNAL);
@@ -196,6 +307,14 @@ void reject_connection(int sock) {
     close(sock);
 }
 
+/**
+ * @brief Handles the client handshake phase.
+ * * Processes the HELLO command, handles reconnections for disconnected sessions,
+ * and enforces the server player limit for new connections.
+ *
+ * @param me_ptr Double pointer to the client object (may be replaced on reconnect).
+ * @return 1 to transition to the next state, 0 to disconnect.
+ */
 int run_handshake(Client **me_ptr) {
     Client *me = *me_ptr;
     char readbuf[BUFFER_SZ]; char linebuf[LINEBUF_SZ]; size_t lp = 0;
@@ -212,10 +331,13 @@ int run_handshake(Client **me_ptr) {
             char name[NAME_LEN];
             char id[ID_LEN];
 
+            /* Robust parsing: separate Name and ID */
             int args = sscanf(linebuf + 6, "%63s %31s", name, id);
             if (args < 1) continue; 
             if (args < 2) strncpy(id, "unknown", sizeof(id));
 
+            /* 1. Attempt to resume an existing session (Reconnect) */
+            /* This does not consume a new player slot. */
             Client *old_session = NULL;
             for (int retries = 0; retries < 5; retries++) {
                 old_session = match_reconnect(name, id, me->sock);
@@ -226,16 +348,16 @@ int run_handshake(Client **me_ptr) {
             if (old_session) {
                 log_printf("[CLIENT] Reconnect success for %s.\n", name);
                 
+                /* Switch context to the old session */
                 pthread_mutex_destroy(&me->lock);
                 free(me);
                 me = old_session;
                 *me_ptr = me;
                 
                 send_short_ack(me, HELLO_ACK, me->seq);
+                match_try_resume(me->match);
                 
-                /* [CHANGED] Capture if we actually resumed from a paused state */
-                int was_paused = match_try_resume(me->match);
-                
+                /* Restore state based on match status */
                 if (me->match && !me->paired) {
                     me->state = STATE_WAITING;
                     send_fmt_with_seq(me, "WAITING Room %d", me->match->id);
@@ -243,12 +365,9 @@ int run_handshake(Client **me_ptr) {
                     me->state = STATE_GAME;
                     Client *opp = (me->match->white == me) ? me->match->black : me->match->white;
                     send_fmt_with_seq(me, "RESUME %s %s", (opp&&opp->name[0])?opp->name:"Unknown", (me->color==0)?"white":"black");
+                    if (opp && opp->sock > 0) send_fmt_with_seq(opp, "OPP_RESUME %s %s", me->name, (me->color==0)?"black":"white");
                     
-                    /* [CHANGED] Only notify opponent if the game was actually paused (long disconnect) */
-                    if (opp && opp->sock > 0 && was_paused) {
-                        send_fmt_with_seq(opp, "OPP_RESUME %s %s", me->name, (me->color==0)?"black":"white");
-                    }
-                    
+                    /* Resend Move History */
                     if (me->match && me->match->moves_count > 0) {
                         char history[BIG_BUFFER_SZ] = "";
                         for(size_t j=0; j<me->match->moves_count; j++) {
@@ -270,11 +389,12 @@ int run_handshake(Client **me_ptr) {
                 return 1;
             }
 
+            /* 2. New Player Connection: Try to reserve a slot */
             if (!try_reserve_slot()) {
                 log_printf("[CLIENT] New connection rejected: Server Full.\n");
                 send_line(me->sock, "FULL"); 
                 usleep(200000); 
-                return 0; 
+                return 0; // Disconnect
             }
             
             me->is_counted = 1; 
@@ -292,6 +412,10 @@ int run_handshake(Client **me_ptr) {
     return 1;
 }
 
+/**
+ * @brief Handles the lobby state.
+ * Allows clients to list rooms, create new rooms, or join existing ones.
+ */
 int run_lobby(Client *me) {
     char readbuf[BUFFER_SZ]; char linebuf[LINEBUF_SZ]; size_t lp = 0;
     int b_start = 0, b_len = 0; 
@@ -341,6 +465,10 @@ int run_lobby(Client *me) {
     return 1;
 }
 
+/**
+ * @brief Handles the waiting state for a room host.
+ * Waits for an opponent to join or for the host to cancel creation.
+ */
 int run_waiting(Client *me) {
     char readbuf[BUFFER_SZ]; char linebuf[LINEBUF_SZ]; size_t lp = 0;
     int b_start = 0, b_len = 0; 
@@ -348,16 +476,17 @@ int run_waiting(Client *me) {
     while (me->state == STATE_WAITING) {
         if (me->paired && me->match) { me->state = STATE_GAME; return 1; }
         
+        /* Non-blocking read to allow polling of paired state */
         int res = read_packet_wrapper(me, readbuf, &b_start, &b_len, &lp, linebuf, sizeof(linebuf), MSG_DONTWAIT);
         
         if (res > 0) {
             if (strstr(linebuf, "EXT")) {
                 if (me->match) {
-                    pthread_mutex_lock(&me->match->lock);
-                    me->match->finished = 1;
-                    pthread_mutex_unlock(&me->match->lock);
-                    
-                    match_leave_by_client(me); 
+                    /* Host cancelled room */
+                    Match *m = me->match; pthread_mutex_lock(&m->lock);
+                    m->finished = 1; m->white = NULL; m->refs--; int last = (m->refs <= 0);
+                    pthread_mutex_unlock(&m->lock); if (last) match_free(m);
+                    me->match = NULL; me->color = -1;
                 }
                 me->state = STATE_LOBBY; return 1;
             }
@@ -371,6 +500,10 @@ int run_waiting(Client *me) {
     return 1;
 }
 
+/**
+ * @brief Handles the main gameplay state.
+ * Processes moves, resignations, draw offers, and game termination.
+ */
 int run_game(Client *me) {
     char readbuf[BUFFER_SZ]; 
     char linebuf[LINEBUF_SZ]; 
@@ -387,11 +520,13 @@ int run_game(Client *me) {
         if (myMatch->finished) {
             pthread_mutex_unlock(&myMatch->lock);
             
+            /* Detach client from match and return to lobby */
             match_leave_by_client(me);
             me->state = STATE_LOBBY;
             return 1;
         }
 
+        /* Move Command */
         if (strncmp(linebuf, "MV", 2) == 0) {
             if (myMatch->turn != me->color) {
                 pthread_mutex_unlock(&myMatch->lock);
@@ -399,6 +534,7 @@ int run_game(Client *me) {
             } else {
                 char *mv = linebuf + 2;
                 int r1, c1, r2, c2;
+                /* Validate Move Logic */
                 if (!is_move_format(mv) || (parse_move(mv, &r1, &c1, &r2, &c2), 0) || 
                     !in_bounds(r1, c1) || !in_bounds(r2, c2) ||
                     !is_legal_move_basic(myMatch, me->color, r1, c1, r2, c2) ||
@@ -407,18 +543,24 @@ int run_game(Client *me) {
                     pthread_mutex_unlock(&myMatch->lock);
                     if (handle_protocol_error(me, "Illegal Move")) return 0;
                 } else {
+                    /* Apply Move */
                     char promo = (strlen(mv) >= 5) ? mv[4] : 0;
                     apply_move(myMatch, r1, c1, r2, c2, promo);
                     match_append_move(myMatch, mv);
                     send_fmt_with_seq(me, "OK_MV");
+                    
                     Client *opp = (me == myMatch->white) ? myMatch->black : myMatch->white;
                     if (opp && opp->sock > 0) send_fmt_with_seq(opp, "OPP_MV %s", mv);
+                    
                     int t = myMatch->turn_timeout_seconds;
                     send_fmt_with_seq(me, "TIME %d", t);
                     if (opp && opp->sock > 0) send_fmt_with_seq(opp, "TIME %d", t);
+                    
+                    /* Check Game Over Conditions */
                     int opp_col = 1 - me->color;
                     int in_chk = is_in_check(&myMatch->state, opp_col);
                     int has_mv = has_any_legal_move(myMatch, opp_col);
+                    
                     if (in_chk && !has_mv) {
                         myMatch->finished = 1;
                         send_fmt_with_seq(me, "WIN_CHKM");
@@ -438,6 +580,7 @@ int run_game(Client *me) {
                 pthread_mutex_unlock(&myMatch->lock);
             }
         }
+        /* Resignation */
         else if (strncmp(linebuf, "RES", 3) == 0) {
             myMatch->finished = 1;
             send_fmt_with_seq(me, "RES");
@@ -445,12 +588,14 @@ int run_game(Client *me) {
             if (opp && opp->sock > 0) send_fmt_with_seq(opp, "OPP_RES");
             pthread_mutex_unlock(&myMatch->lock);
         }
+        /* Draw Offer */
         else if (strncmp(linebuf, "DRW_OFF", 7) == 0) {
              Client *opp = (me == myMatch->white) ? myMatch->black : myMatch->white;
              if (opp && opp->sock > 0) send_fmt_with_seq(opp, "DRW_OFF");
              myMatch->draw_offered_by = me->color;
              pthread_mutex_unlock(&myMatch->lock);
         }
+        /* Draw Accept */
         else if (strncmp(linebuf, "DRW_ACC", 7) == 0) {
             Client *opp = (me == myMatch->white) ? myMatch->black : myMatch->white;
             if (myMatch->draw_offered_by != opp->color) { 
@@ -461,18 +606,21 @@ int run_game(Client *me) {
              if (opp && opp->sock > 0) send_fmt_with_seq(opp, "DRW_ACD");
              pthread_mutex_unlock(&myMatch->lock);
         }
+        /* Draw Decline */
         else if (strncmp(linebuf, "DRW_DEC", 7) == 0) {
              Client *opp = (me == myMatch->white) ? myMatch->black : myMatch->white;
              if (opp && opp->sock > 0) send_fmt_with_seq(opp, "DRW_DCD");
              myMatch->draw_offered_by = -1;
              pthread_mutex_unlock(&myMatch->lock);
         }
+        /* Exit / Disconnect */
         else if (strncmp(linebuf, "EXT", 3) == 0) {
             myMatch->finished = 1;
             Client *opp = (me == myMatch->white) ? myMatch->black : myMatch->white;
             if (opp) send_fmt_with_seq(opp, "OPP_EXT");
             pthread_mutex_unlock(&myMatch->lock);
         }
+        /* Ignore Stale Commands */
         else if (strncmp(linebuf, "LIST", 4) == 0 || strncmp(linebuf, "JOIN", 4) == 0 || strncmp(linebuf, "NEW", 3) == 0) {
              pthread_mutex_unlock(&myMatch->lock);
              log_printf("Ignored stale lobby command in game: %s\n", linebuf);
@@ -482,6 +630,7 @@ int run_game(Client *me) {
             if (handle_protocol_error(me, "Unknown game command")) return 0;
         }
         
+        /* Cleanup if game finished during loop */
         if (myMatch && myMatch->finished) {
             match_leave_by_client(me);
             me->state = STATE_LOBBY;
@@ -491,6 +640,11 @@ int run_game(Client *me) {
     return 1;
 }
 
+/**
+ * @brief Main entry point for a client thread.
+ * * Initializes the client state and executes the Finite State Machine (FSM)
+ * loop until disconnection. Handles cleanup upon exit.
+ */
 void *client_worker(void *arg) {
     Client *me = (Client *)arg;
     unsigned int seed = time(NULL) ^ (uintptr_t)me ^ me->sock;
@@ -519,7 +673,7 @@ void *client_worker(void *arg) {
     if (persisted) {
         log_printf("[CLIENT %p] Client thread exited (Persisted). Closing sock %d.\n", me, me->sock);
         if (sock_to_close> 0) close(sock_to_close);
-        /* Do NOT decrement. The slot is preserved. */
+        /* Do NOT decrement. The slot is preserved for reconnection. */
     } else {
         log_printf("[CLIENT %p] Client thread exited (Freeing).\n", me);
         if (sock_to_close > 0) close(sock_to_close);

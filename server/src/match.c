@@ -1,4 +1,12 @@
 /* src/match.c */
+/**
+ * @file match.c
+ * @brief Management of game rooms, matchmaking, and game state persistence.
+ *
+ * This file handles creation and destruction of matches, player joining, and the
+ * "Watchdog" thread which enforces time limits and handles disconnection grace periods.
+ */
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -21,7 +29,9 @@ static int next_room_id = 1;
 static int current_room_count = 0;
 static pthread_mutex_t room_registry_lock = PTHREAD_MUTEX_INITIALIZER;
 
-/* Thread-safe accessor */
+/**
+ * @brief Returns the current number of active rooms in a thread-safe manner.
+ */
 int get_active_room_count(void) {
     int count;
     pthread_mutex_lock(&room_registry_lock);
@@ -30,6 +40,9 @@ int get_active_room_count(void) {
     return count;
 }
 
+/**
+ * @brief Adds a match to the global registry list.
+ */
 void register_room(Match *m) {
     pthread_mutex_lock(&room_registry_lock);
     m->id = next_room_id++;
@@ -39,6 +52,9 @@ void register_room(Match *m) {
     pthread_mutex_unlock(&room_registry_lock);
 }
 
+/**
+ * @brief Removes a match from the global registry list.
+ */
 void unregister_room(Match *m) {
     pthread_mutex_lock(&room_registry_lock);
     Match **curr = &global_room_list;
@@ -53,6 +69,13 @@ void unregister_room(Match *m) {
     pthread_mutex_unlock(&room_registry_lock);
 }
 
+/**
+ * @brief Detaches a client from their match struct gracefully.
+ * * If the client was the last reference holder to the match (i.e., opponent already left),
+ * the match is freed.
+ *
+ * @param me Pointer to the Client leaving.
+ */
 void match_leave_by_client(Client *me) {
     if (!me || !me->match) return;
     Match *m = me->match;
@@ -74,6 +97,12 @@ void match_leave_by_client(Client *me) {
     if (last) match_free(m);
 }
 
+/**
+ * @brief Attempts to join a match by its ID (as the black player).
+ * @param id The Room ID to join.
+ * @param black The client attempting to join.
+ * @return 0 on success, -1 if room not found or full.
+ */
 int match_join_by_id(int id, Client *black) {
     pthread_mutex_lock(&room_registry_lock);
     Match *curr = global_room_list;
@@ -105,6 +134,10 @@ int match_join_by_id(int id, Client *black) {
     return 0;
 }
 
+/**
+ * @brief Generates a string listing all available (open) rooms.
+ * @return A dynamically allocated string containing the list. Caller must free.
+ */
 char *get_room_list_str() {
     pthread_mutex_lock(&room_registry_lock);
     char *buf = malloc(BIG_BUFFER_SZ);
@@ -134,6 +167,12 @@ char *get_room_list_str() {
     return buf;
 }
 
+/**
+ * @brief Creates a new match hosted by the given client.
+ * Starts the watchdog thread for the match.
+ * @param white The hosting client.
+ * @return Pointer to the new Match, or NULL on failure.
+ */
 Match *match_create(Client *white) {
     Match *m = calloc(1, sizeof(Match));
     if (!m) return NULL;
@@ -157,7 +196,7 @@ Match *match_create(Client *white) {
     m->turn_timeout_seconds = TURN_TIMEOUT_SECONDS;
     m->elapsed_at_pause = 0;
     m->is_paused = 0;
-    m->refs = 2; 
+    m->refs = 2; /* 1 for Creator, 1 for Watchdog */
 
     register_room(m);
 
@@ -171,6 +210,10 @@ Match *match_create(Client *white) {
     return m;
 }
 
+/**
+ * @brief Frees all resources associated with a match.
+ * Closes any lingering sockets and frees move history.
+ */
 void match_free(Match *m) {
     if (!m) return;
     unregister_room(m);
@@ -184,6 +227,13 @@ void match_free(Match *m) {
     free(m);
 }
 
+/**
+ * @brief Handles a client disconnect event within a match context.
+ * * Instead of immediately freeing the client, this function puts the session into a
+ * "disconnected" state (grace period), allowing for reconnection.
+ *
+ * @return 1 if session persisted (grace period), 0 if session destroyed (game over).
+ */
 int match_release_after_client(Client *me) {
     if (!me) return 0;
     if (!me->match) return 0; 
@@ -192,6 +242,7 @@ int match_release_after_client(Client *me) {
 
     pthread_mutex_lock(&m->lock);
     
+    /* If game is already finished, perform standard cleanup */
     if (m->finished) {
         if (me == m->white) m->white = NULL;
         else if (me == m->black) m->black = NULL;
@@ -205,6 +256,7 @@ int match_release_after_client(Client *me) {
         return 0; 
     }
 
+    /* Start Grace Period */
     log_printf("[MATCH] Client %p (%s) disconnected. Entering grace period.\n", me, me->name);
     
     me->sock = -1; 
@@ -214,6 +266,15 @@ int match_release_after_client(Client *me) {
     return 1; 
 }
 
+/**
+ * @brief Attempts to reconnect a client to an existing active session.
+ * * Searches all active matches for a disconnected player with matching Name and ID.
+ *
+ * @param name The player's name.
+ * @param id The player's unique session ID.
+ * @param new_sock The new socket file descriptor.
+ * @return Pointer to the existing Client struct if found, NULL otherwise.
+ */
 Client *match_reconnect(const char *name, const char *id, int new_sock) {
     pthread_mutex_lock(&room_registry_lock);
     Match *curr = global_room_list;
@@ -252,7 +313,10 @@ Client *match_reconnect(const char *name, const char *id, int new_sock) {
     return NULL;
 }
 
-/* [CHANGED] Returns 1 if actually resumed, 0 if was not paused */
+/**
+ * @brief Resumes the game timer if the match was paused.
+ * @return 1 if the match was actually paused and is now resumed, 0 otherwise.
+ */
 int match_try_resume(Match *m) {
     int resumed = 0;
     if (!m) return 0;
@@ -268,6 +332,9 @@ int match_try_resume(Match *m) {
     return resumed;
 }
 
+/**
+ * @brief Calculates remaining time for the current turn.
+ */
 int match_get_remaining_time(Match *m) {
     if (m->finished) return 0;
     if (m->is_paused) {
@@ -281,6 +348,9 @@ int match_get_remaining_time(Match *m) {
     return (left < 0) ? 0 : left;
 }
 
+/**
+ * @brief Appends a move string to the match history log.
+ */
 int match_append_move(Match *m, const char *mv) {
     if (!m || !mv) return -1;
     if (m->moves_count + 1 > m->moves_cap) {
@@ -294,6 +364,9 @@ int match_append_move(Match *m, const char *mv) {
     return 0;
 }
 
+/**
+ * @brief Sends START notification to both players.
+ */
 void notify_start(Match *m) {
     if (!m || !m->white || !m->black) return;
     send_fmt_with_seq(m->white, "START %s white", m->black->name);
@@ -304,6 +377,14 @@ void notify_start(Match *m) {
     send_fmt_with_seq(m->black, "TIME %d", t);
 }
 
+/**
+ * @brief Background thread that monitors match health.
+ * * Performs the following checks every second:
+ * 1. Turn Timeout: Forfeits game if player takes too long.
+ * 2. Grace Period: Pauses game if a player disconnects temporarily.
+ * 3. Heartbeat: Detects zombie connections.
+ * 4. Final Disconnect: Forfeits game if a disconnected player fails to return in time.
+ */
 void *match_watchdog(void *arg) {
     Match *m = (Match *)arg;
     if (!m) return NULL;
@@ -338,9 +419,10 @@ void *match_watchdog(void *arg) {
             continue; 
         }
 
-        /* 2. Grace Period */
+        /* 2. Grace Period Logic: Pause game if connection lost */
         if (m->white && m->white->sock == -1 && !m->is_paused) {
             if (now - m->white->disconnect_time > DISCONNECT_GRACE_PERIOD) {
+                log_printf("[MATCH] Client %s grace period expired. Pausing match.\n", m->white->name);
                 if (m->last_move_time > 0) {
                     m->elapsed_at_pause = now - m->last_move_time;
                     m->last_move_time = 0; 
@@ -351,6 +433,7 @@ void *match_watchdog(void *arg) {
         }
         if (m->black && m->black->sock == -1 && !m->is_paused) {
             if (now - m->black->disconnect_time > DISCONNECT_GRACE_PERIOD) {
+                log_printf("[MATCH] Client %s grace period expired. Pausing match.\n", m->black->name);
                 if (m->last_move_time > 0) {
                     m->elapsed_at_pause = now - m->last_move_time;
                     m->last_move_time = 0; 
@@ -360,17 +443,19 @@ void *match_watchdog(void *arg) {
             }
         }
 
-        /* 3. Zombie Check */
+        /* 3. Zombie Connection Check (Heartbeat) */
         if (m->white && m->white->sock > 0 && (now - m->white->last_heartbeat > HEARTBEAT_TIMEOUT_SECONDS)) {
+            log_printf("[WATCHDOG] Client %p (%s) timed out (no heartbeat).\n", m->white, m->white->name);
             shutdown(m->white->sock, SHUT_RDWR);
             m->white->disconnect_time = now;
         }
         if (m->black && m->black->sock > 0 && (now - m->black->last_heartbeat > HEARTBEAT_TIMEOUT_SECONDS)) {
+            log_printf("[WATCHDOG] Client %p (%s) timed out (no heartbeat).\n", m->black, m->black->name);
             shutdown(m->black->sock, SHUT_RDWR);
             m->black->disconnect_time = now;
         }
 
-        /* 4. Final Disconnect */
+        /* 4. Final Disconnect Timeout */
         int w_dc = 0;
         if (m->white && m->white->sock == -1) {
              if (now - m->white->disconnect_time > DISCONNECT_TIMEOUT_SECONDS) w_dc = 1;
@@ -385,9 +470,17 @@ void *match_watchdog(void *arg) {
             Client *winner = w_dc ? m->black : m->white; 
             if (winner && winner->sock > 0) send_line(winner->sock, "OPP_EXT");
             
-            if (w_dc) { decrement_player_count(); m->refs--; }
-            if (b_dc) { decrement_player_count(); m->refs--; }
-            
+            /* The grace period expired for a disconnected client.
+               They were holding a slot (is_counted was 1). It must be released now. */
+            if (w_dc) {
+                decrement_player_count();
+                m->refs--;
+            }
+            if (b_dc) {
+                decrement_player_count();
+                m->refs--;
+            }
+
             pthread_mutex_unlock(&m->lock);
             continue;
         }

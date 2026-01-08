@@ -2,11 +2,16 @@ import javax.swing.*;
 import java.awt.*;
 import java.awt.event.ActionListener;
 
+/**
+ * WaitingPanel
+ *
+ * Displayed to the room host while waiting for an opponent to join.
+ * Includes a simple rotating animation.
+ */
 public class WaitingPanel extends JPanel {
     private final Timer timer;
     private int angle = 0;
     
-    // [FIX] Pre-allocate constants
     private static final Color TRACK_COLOR = new Color(80, 80, 80);
     private static final Stroke TRACK_STROKE = new BasicStroke(4);
 
@@ -46,7 +51,6 @@ public class WaitingPanel extends JPanel {
         int cx = getWidth() / 2;
         int cy = getHeight() / 2;
         
-        // [FIX] Use constants
         g2.setColor(TRACK_COLOR);
         g2.setStroke(TRACK_STROKE);
         g2.drawOval(cx - r, cy - r, 2 * r, 2 * r);

@@ -5,25 +5,32 @@ import java.io.File;
 import java.io.IOException;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentLinkedQueue;
-
 import javax.imageio.ImageIO;
 
+/**
+ * Main application entry point and controller for the Chess Client.
+ * <p>
+ * This class orchestrates the application lifecycle, manages the main UI frame
+ * (switching between Welcome, Lobby, Waiting, and Game views), and handles
+ * high-level network logic such as connection initiation and automatic reconnection.
+ * </p>
+ */
 public class ChessClient {
     private String serverHost = "127.0.0.1";
     private int serverPort = 10001;
     private static final String BACK_DIR = "backgrounds"; 
-    private int autoRefreshTime = 8000; // every 8s
+    private int autoRefreshTime = 8000; // Automatic refresh interval in milliseconds
     
     private String clientName;
     private final String sessionID;
     
-    // State
+    // Connection State
     private volatile boolean intentionalDisconnect = false;
     private volatile boolean isReconnecting = false;
     private volatile boolean connectionEstablished = false; 
     private volatile boolean handshakeCompleted = false;
     
-    // [NEW] Offline message queue
+    // Queue for buffering messages when offline
     private final ConcurrentLinkedQueue<String> offlineQueue = new ConcurrentLinkedQueue<>();
     
     // Retry limits
@@ -38,7 +45,7 @@ public class ChessClient {
     private ResultOverlay resultOverlay;
     private volatile NetworkClient networkClient;
     
-    // Login UI
+    // Login UI Inputs
     private JTextField nameField;
     private JTextField serverIpField; 
     private JTextField serverPortField;
@@ -65,17 +72,29 @@ public class ChessClient {
     private static final String CARD_WAITING = "waiting";
     private static final String CARD_GAME = "game";
 
+    /**
+     * Constructs the ChessClient and generates a unique session ID.
+     */
     public ChessClient() {
         this.imageManager = new ImageManager("pieces");
+        // Generate a persistent session ID for reconnection support
         this.sessionID = UUID.randomUUID().toString().substring(0, 8);
     }
 
+    /**
+     * Application entry point.
+     * @param args Command line arguments (unused).
+     */
     public static void main(String[] args) {
         SwingUtilities.invokeLater(() -> {
             try { new ChessClient().createAndShowGUI(); } catch (Exception e) { e.printStackTrace(); }
         });
     }
 
+    /**
+     * Initializes the graphical user interface, including the main frame,
+     * layout manager, sub-panels, and status bar.
+     */
     private void createAndShowGUI() {
         imageManager.loadIcons();
         clientName = Utils.generateRandomName();
@@ -101,6 +120,7 @@ public class ChessClient {
 
         frame.getContentPane().add(cards, BorderLayout.CENTER);
 
+        // Status Bar
         JPanel statusPanel = new JPanel(new BorderLayout());
         statusPanel.setBackground(new Color(40, 40, 40));
         statusPanel.setBorder(BorderFactory.createEmptyBorder(4, 12, 4, 12));
@@ -114,6 +134,7 @@ public class ChessClient {
         statusPanel.add(timerLabel, BorderLayout.EAST);
         frame.getContentPane().add(statusPanel, BorderLayout.NORTH);
 
+        // Result Overlay
         resultOverlay = new ResultOverlay(e -> onOverlayContinueClicked());
         frame.getLayeredPane().add(resultOverlay, JLayeredPane.MODAL_LAYER);
         frame.addComponentListener(new ComponentAdapter() {
@@ -121,6 +142,7 @@ public class ChessClient {
             public void componentShown(ComponentEvent e) { resizeOverlay(); }
         });
 
+        // Timers
         turnTimer = new Timer(1000, e -> {
             if (remainingSeconds > 0) {
                 remainingSeconds--;
@@ -139,14 +161,26 @@ public class ChessClient {
         resizeOverlay();
     }
 
+    /**
+     * Stores the details of a locally initiated move to be applied upon server confirmation.
+     * @param from Algebraic coordinate of the source square (e.g., "e2").
+     * @param to Algebraic coordinate of the destination square (e.g., "e4").
+     */
     public void setPendingMove(String from, String to) {
         this.pendingFrom = from;
         this.pendingTo = to;
     }
 
+    /**
+     * Sends a command to the server via the NetworkClient.
+     * <p>
+     * If the client is currently disconnected, the message is queued in {@code offlineQueue}
+     * and sent automatically once the connection is re-established.
+     * </p>
+     * @param cmd The raw protocol command string.
+     */
     public void sendNetworkCommand(String cmd) {
         NetworkClient nc = this.networkClient;
-        // [CHANGED] If disconnected, queue the message instead of dropping it
         if (nc != null && nc.isConnected()) {
             nc.sendRaw(cmd);
         } else {
@@ -154,6 +188,9 @@ public class ChessClient {
         }
     }
 
+    /**
+     * Initiates a graceful disconnect from the server and returns the user to the Welcome screen.
+     */
     public void disconnect() {
         intentionalDisconnect = true;
         exitToWelcome();
@@ -168,6 +205,10 @@ public class ChessClient {
         }
     }
 
+    /**
+     * Handles the application closing event. Attempts to send disconnect commands
+     * before terminating the JVM.
+     */
     public void handleDisconnectAndExit() {
         intentionalDisconnect = true;
         closeDisconnectPopup();
@@ -189,6 +230,7 @@ public class ChessClient {
             System.exit(0);
         }).start();
 
+        // Fallback force exit
         new Thread(() -> {
             try { Thread.sleep(200); } catch (InterruptedException ignored) {}
             System.exit(0);
@@ -236,6 +278,9 @@ public class ChessClient {
 
     // --- Networking ---
 
+    /**
+     * Starts a new network connection on a background thread.
+     */
     private void startConnection() {
         NetworkClient oldClient = this.networkClient;
         if (oldClient != null) {
@@ -304,6 +349,10 @@ public class ChessClient {
         };
     }
 
+    /**
+     * Logic for automatic reconnection. Attempts to reconnect up to MAX_RECONNECT_ATTEMPTS.
+     * Upon success, flushes any queued offline messages.
+     */
     private void attemptReconnect() {
         if (isReconnecting || intentionalDisconnect) return;
         
@@ -327,8 +376,7 @@ public class ChessClient {
         SwingUtilities.invokeLater(() -> {
             statusLabel.setText("Connection lost. Reconnecting (" + reconnectAttempts + "/" + MAX_RECONNECT_ATTEMPTS + ")...");
             statusLabel.setForeground(Color.ORANGE);
-            /* [CHANGED] Do NOT disable game controls. 
-               This allows the user to make a move (queueing it) while reconnecting. */
+            /* Do NOT disable game controls. This allows the user to make a move (queueing it) while reconnecting. */
             if (lobbyPanel != null) lobbyPanel.setButtonsEnabled(false);
         });
         
@@ -344,7 +392,7 @@ public class ChessClient {
                 
                 newNc.connect(serverHost, serverPort, clientName, sessionID);
                 
-                /* [NEW] Flush the offline queue immediately after connection/handshake initiation */
+                // Flush the offline queue immediately after connection/handshake initiation
                 String queuedMsg;
                 while ((queuedMsg = offlineQueue.poll()) != null) {
                     newNc.sendRaw(queuedMsg);
@@ -393,6 +441,10 @@ public class ChessClient {
         if (connectBtn != null) connectBtn.setEnabled(true);
     }
 
+    /**
+     * Parses messages received from the server and updates the UI accordingly.
+     * @param msg The raw message string (sequence numbers stripped).
+     */
     private void parseServerMessage(String msg) {
         String u = msg.trim();
         
@@ -408,9 +460,8 @@ public class ChessClient {
             return;
         }
 
-        if (reconnectAttempts > 0) reconnectAttempts = 0;
-
         if (u.startsWith(Protocol.RESP_WELCOME)) {
+            if (reconnectAttempts > 0) reconnectAttempts = 0;
             handshakeCompleted = true;
         }
 

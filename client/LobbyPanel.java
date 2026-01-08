@@ -4,6 +4,12 @@ import javax.imageio.ImageIO;
 import java.io.File;
 import java.io.IOException;
 
+/**
+ * LobbyPanel
+ *
+ * Displays the list of available game rooms.
+ * Allows users to Create a new room, Join an existing one, or Refresh the list.
+ */
 public class LobbyPanel extends JPanel {
     private final DefaultListModel<String> roomListModel;
     private final JList<String> roomList;
@@ -98,7 +104,6 @@ public class LobbyPanel extends JPanel {
         btnDisconnect = new JButton("Disconnect"); 
         btnExit = new JButton("Exit");
 
-        // [FIX] Removed optimistic UI call. Waits for server.
         btnCreateRoom.addActionListener(e -> {
             setButtonsEnabled(false);
             controller.sendNetworkCommand(Protocol.CMD_NEW);
@@ -154,6 +159,9 @@ public class LobbyPanel extends JPanel {
         }
     }
 
+    /**
+     * Updates the displayed list of rooms based on the server response.
+     */
     public void updateRoomList(String payload) {
         SwingUtilities.invokeLater(() -> setButtonsEnabled(true));
 

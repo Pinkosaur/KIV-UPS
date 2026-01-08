@@ -10,6 +10,13 @@ import java.util.concurrent.LinkedBlockingQueue;
 import java.time.LocalTime;
 import java.time.format.DateTimeFormatter;
 
+/**
+ * NetworkClient
+ *
+ * Handles low-level TCP socket communication.
+ * Manages separate threads for reading, writing, and heartbeats.
+ * Provides a listener interface for upper layers to handle messages and events.
+ */
 public class NetworkClient {
     public interface NetworkListener {
         void onConnected();
@@ -37,7 +44,6 @@ public class NetworkClient {
     private final Object seqLock = new Object();
     private int seqOutbound = -1; 
     
-    // [LOGGING] Formatter for timestamps
     private final DateTimeFormatter timeFmt = DateTimeFormatter.ofPattern("HH:mm:ss.SSS");
 
     public NetworkClient(NetworkListener listener) {
@@ -48,6 +54,11 @@ public class NetworkClient {
         System.out.println("[" + LocalTime.now().format(timeFmt) + "] " + prefix + " " + msg);
     }
 
+    /**
+     * Establishes a TCP connection to the server.
+     * Starts reader, writer, and heartbeat threads.
+     * Logs the local port upon successful connection.
+     */
     public synchronized void connect(String host, int port, String clientName, String sessionID) throws IOException {
         if (connected) return;
         closed = false;
@@ -56,6 +67,10 @@ public class NetworkClient {
             log("CONN", "Connecting to " + host + ":" + port + " as " + clientName);
             socket = new Socket(host, port);
             socket.setTcpNoDelay(true);
+            
+            // Log local port information
+            log("CONN", "Local connection established on port: " + socket.getLocalPort());
+
             in = new BufferedReader(new InputStreamReader(socket.getInputStream(), StandardCharsets.UTF_8));
             out = new PrintWriter(new OutputStreamWriter(socket.getOutputStream(), StandardCharsets.UTF_8), true);
 
@@ -90,9 +105,7 @@ public class NetworkClient {
             try {
                 String msg = writeQueue.take();
                 if (out != null) {
-                    // [LOGGING] Log exact outgoing string
                     log("[RAW OUT]", msg);
-                    
                     out.println(msg);
                     
                     if (out.checkError()) {
@@ -134,7 +147,6 @@ public class NetworkClient {
         try {
             String rawLine;
             while ((rawLine = in.readLine()) != null) {
-                // [LOGGING] Log exact incoming string
                 log("[RAW IN ]", rawLine);
 
                 lastRxTime = System.currentTimeMillis();

@@ -4,29 +4,29 @@ import java.util.Arrays;
 /**
  * BoardModel
  *
- * Encapsulates an 8x8 chessboard (char[][]), en-passant target, and provides the
- * move legality / simulation utilities used by the GUI.
- *
- * This class mirrors the move/attack/king-check logic from the original single-file client,
- * so higher-level code can call these methods with minimal change.
+ * Encapsulates the 8x8 chessboard state (char[][]) and game rules logic.
+ * It handles move validation, special moves (En Passant, Castling, Promotion),
+ * and threat detection (Check/Checkmate analysis).
  *
  * Piece encoding:
- *   Uppercase = White: P N B R Q K
- *   Lowercase = Black: p n b r q k
- *   Empty square = '.'
+ * Uppercase = White: P N B R Q K
+ * Lowercase = Black: p n b r q k
+ * Empty square = '.'
  */
 public class BoardModel {
     public final char[][] board;
-    public int epR = -1, epC = -1; // en-passant target (model coords) or -1,-1
-    public char pendingPromo = 0;   // used if calling applyLocalMove with a pending promo
-    public Point lastFrom = null, lastTo = null;
+    public int epR = -1, epC = -1; // En-passant target coordinates, or -1 if none
+    public char pendingPromo = 0;   // Stores promotion choice for the next move
+    public Point lastFrom = null, lastTo = null; // Tracks the last move for UI highlighting
 
     public BoardModel() {
         board = new char[8][8];
         initBoardModel();
     }
 
-    /** Initialize starting chess position */
+    /**
+     * Initializes or resets the board to the standard chess starting position.
+     */
     public void initBoardModel() {
         char[] backBlack = {'r','n','b','q','k','b','n','r'};
         char[] backWhite = {'R','N','B','Q','K','B','N','R'};
@@ -40,10 +40,17 @@ public class BoardModel {
         lastFrom = lastTo = null;
     }
 
-    public boolean inBounds(int r,int c){ return r>=0 && r<8 && c>=0 && c<8; }
+    /**
+     * Checks if coordinates are within the board boundaries.
+     */
+    public boolean inBounds(int r, int c){ return r>=0 && r<8 && c>=0 && c<8; }
 
-    /** Path-clear test (excludes endpoints). Uses the instance board. */
-    public boolean pathClear(int r1,int c1,int r2,int c2) {
+    /**
+     * Checks if the path between two squares is clear of obstructions.
+     * Does not check the start or end squares themselves.
+     * @return true if the path is empty.
+     */
+    public boolean pathClear(int r1, int c1, int r2, int c2) {
         int dr = (r2>r1)?1: (r2<r1)?-1:0;
         int dc = (c2>c1)?1: (c2<c1)?-1:0;
         int r = r1 + dr, c = c1 + dc;
@@ -55,8 +62,10 @@ public class BoardModel {
         return true;
     }
 
-    /** Functional variant that checks pathClear on an arbitrary board array */
-    public boolean pathClear(char[][] b, int r1,int c1,int r2,int c2) {
+    /**
+     * Helper to check path clearance on a hypothetical board state.
+     */
+    public boolean pathClear(char[][] b, int r1, int c1, int r2, int c2) {
         int dr = (r2>r1)?1: (r2<r1)?-1:0;
         int dc = (c2>c1)?1: (c2<c1)?-1:0;
         int r = r1 + dr, c = c1 + dc;
@@ -68,24 +77,36 @@ public class BoardModel {
         return true;
     }
 
-    /** Return true if the piece on r1,c1 can move to r2,c2 ignoring check (basic board rules). */
-    public boolean isLegalMoveBasic(int r1,int c1,int r2,int c2) {
+    /**
+     * Validates if a move is legal according to piece movement rules (geometry).
+     * This does NOT check if the move leaves the king in check.
+     */
+    public boolean isLegalMoveBasic(int r1, int c1, int r2, int c2) {
         if (!inBounds(r1,c1) || !inBounds(r2,c2)) return false;
         char p = board[r1][c1];
         if (p=='.') return false;
         char t = board[r2][c2];
+        
+        // Cannot capture own piece
         if (t!='.' && (Character.isUpperCase(t)==Character.isUpperCase(p))) return false;
+        
         int dr = r2 - r1; int dc = c2 - c1; int absdr = Math.abs(dr), absdc = Math.abs(dc);
 
         if (p=='P') {
-            if (c1==c2 && board[r2][c2]=='.') { if (dr==-1) return true; if (r1==6 && dr==-2 && board[5][c1]=='.') return true; }
+            if (c1==c2 && board[r2][c2]=='.') { 
+                if (dr==-1) return true; 
+                if (r1==6 && dr==-2 && board[5][c1]=='.') return true; 
+            }
             if (absdc==1 && dr==-1 && t!='.' && Character.isLowerCase(t)) return true;
-            /* en-passant capture: diagonal to empty square equals ep target */
+            /* En-passant capture */
             if (absdc==1 && dr==-1 && t=='.' && epR==r2 && epC==c2) return true;
             return false;
         }
         if (p=='p') {
-            if (c1==c2 && board[r2][c2]=='.') { if (dr==1) return true; if (r1==1 && dr==2 && board[2][c1]=='.') return true; }
+            if (c1==c2 && board[r2][c2]=='.') { 
+                if (dr==1) return true; 
+                if (r1==1 && dr==2 && board[2][c1]=='.') return true; 
+            }
             if (absdc==1 && dr==1 && t!='.' && Character.isUpperCase(t)) return true;
             if (absdc==1 && dr==1 && t=='.' && epR==r2 && epC==c2) return true;
             return false;
@@ -95,16 +116,14 @@ public class BoardModel {
         if (p=='R' || p=='r') { if (dr!=0 && dc!=0) return false; return pathClear(board,r1,c1,r2,c2); }
         if (p=='Q' || p=='q') { if (absdr==absdc || dr==0 || dc==0) return pathClear(board,r1,c1,r2,c2); return false; }
 
-        /* King: allow normal king steps and permissive client-side castling checks
-         * (final legality must be filtered by moveLeavesInCheck). */
         if (p=='K' || p=='k') {
             if (absdr<=1 && absdc<=1) return true;
-            /* castling attempt: two-square horizontal move */
+            /* Client-side castling pre-check */
             if (r1 == r2 && Math.abs(c2 - c1) == 2) {
                 if (p == 'K') {
                     int color = 0; int opp = 1;
                     if (!(r1 == 7 && c1 == 4)) return false;
-                    // kingside
+                    // Kingside
                     if (c2 == 6) {
                         if (board[7][7] != 'R') return false;
                         if (board[7][5] != '.' || board[7][6] != '.') return false;
@@ -114,7 +133,7 @@ public class BoardModel {
                         if (moveLeavesInCheck(board, color, r1, c1, r2, c2)) return false;
                         return true;
                     }
-                    // queenside
+                    // Queenside
                     if (c2 == 2) {
                         if (board[7][0] != 'R') return false;
                         if (board[7][1] != '.' || board[7][2] != '.' || board[7][3] != '.') return false;
@@ -152,7 +171,9 @@ public class BoardModel {
         return false;
     }
 
-    /** Return true if square r,c is attacked by color 'byColor' on the provided board */
+    /**
+     * Determines if a specific square is under attack by the opponent.
+     */
     public boolean isSquareAttacked(char[][] b, int r, int c, int byColor) {
         for (int r0=0;r0<8;r0++) for (int c0=0;c0<8;c0++) {
             char p = b[r0][c0];
@@ -174,14 +195,13 @@ public class BoardModel {
         return false;
     }
 
-    /** Find king of the specified color on the instance board; returns {r,c} or null */
+    /** Find the king's coordinates for the given color. */
     public int[] findKing(int color) {
         char target = (color==0)?'K':'k';
         for (int r=0;r<8;r++) for (int c=0;c<8;c++) if (board[r][c]==target) return new int[]{r,c};
         return null;
     }
 
-    /** Functional findKing over a given board array */
     public int[] findKing(char[][] b, int color) {
         char target = (color==0)?'K':'k';
         for (int r=0;r<8;r++) for (int c=0;c<8;c++) if (b[r][c]==target) return new int[]{r,c};
@@ -189,10 +209,7 @@ public class BoardModel {
     }
 
     /**
-     * Simulate the move on a copy and return true if after the move the player's king
-     * would be attacked (i.e., the move *leaves* the player in check).
-     *
-     * This mirrors the original client-side simulation, including en-passant and castling handling.
+     * Simulates a move to check if it places the player's own king in check.
      */
     public boolean moveLeavesInCheck(char[][] b, int color, int r1,int c1,int r2,int c2) {
         char[][] copy = new char[8][8];
@@ -224,7 +241,7 @@ public class BoardModel {
         copy[r2][c2] = copy[r1][c1];
         copy[r1][c1] = '.';
 
-        /* Promotions approximate: promote to queen */
+        /* Promotions (simulate as Queen) */
         if (p=='P' && r2==0) copy[r2][c2] = 'Q';
         if (p=='p' && r2==7) copy[r2][c2] = 'q';
 
@@ -233,12 +250,10 @@ public class BoardModel {
         return isSquareAttacked(copy, kingPos[0], kingPos[1], 1-color);
     }
 
-    /** Overload using the instance board */
     public boolean moveLeavesInCheck(int color, int r1,int c1,int r2,int c2) {
         return moveLeavesInCheck(this.board, color, r1,c1,r2,c2);
     }
 
-    /** Convenience: returns true if piece belongs to color (0 white, 1 black) */
     public static boolean isOwnPiece(char p, int myColor) {
         if (p=='.') return false;
         if (myColor==0) return Character.isUpperCase(p);
@@ -247,10 +262,8 @@ public class BoardModel {
     }
 
     /**
-     * Apply a local move (from..to) to the instance board, preserving the exact
-     * client-side update semantics (castling rook move, en-passant capture, promotion).
-     *
-     * from/to are two-char algebraic coordinates like "e2","e4".
+     * Applies a move locally to the board state.
+     * Updates special state like En Passant target and pending promotion.
      */
     public void applyLocalMove(String from, String to) {
         int r1 = 8 - (from.charAt(1) - '0');
@@ -261,7 +274,8 @@ public class BoardModel {
         lastTo = new Point(r2, c2);
         char piece = board[r1][c1];
         board[r1][c1] = '.';
-        // Castling: if king moved two squares horizontally, move corresponding rook
+        
+        // Castling
         if ((piece == 'K' || piece == 'k') && r1 == r2 && Math.abs(c2 - c1) == 2) {
             board[r2][c2] = piece;
             if (c2 > c1) {
@@ -277,20 +291,23 @@ public class BoardModel {
             pendingPromo = 0;
             return;
         }
-        // en-passant capture
+        
+        // En-passant capture
         if ((piece == 'P' || piece == 'p') && board[r2][c2] == '.' && c1 != c2) {
             int capR = (piece == 'P') ? r2 + 1 : r2 - 1;
             if (capR >= 0 && capR < 8 && board[capR][c2] != '.') {
                 board[capR][c2] = '.';
             }
         }
-        // Normal move
+        
         board[r2][c2] = piece;
-        // pawn double step sets ep target
+        
+        // Set En Passant target
         if (piece == 'P' && r1 == 6 && r2 == 4 && c1 == c2) { epR = 5; epC = c1; }
         else if (piece == 'p' && r1 == 1 && r2 == 3 && c1 == c2) { epR = 2; epC = c1; }
         else { epR = epC = -1; }
-        // Promotion: use pendingPromo if set, otherwise queen
+        
+        // Promotion
         if (piece == 'P' && r2 == 0) {
             if (pendingPromo != 0) board[r2][c2] = Character.toUpperCase(pendingPromo);
             else board[r2][c2] = 'Q';
@@ -302,8 +319,8 @@ public class BoardModel {
     }
 
     /**
-     * Apply an opponent move provided as "e7e5" or "e7e8q" (promotion char optional).
-     * Mirrors the GUI's applyOpponentMove logic.
+     * Applies a move received from the opponent.
+     * Expects algebraic notation string (e.g., "e7e5" or "a7a8q").
      */
     public void applyOpponentMove(String mv) {
         String from = mv.substring(0,2);
@@ -317,6 +334,7 @@ public class BoardModel {
         lastTo = new Point(r2, c2);
         char piece = board[r1][c1];
         board[r1][c1] = '.';
+        
         // Castling
         if ((piece == 'K' || piece == 'k') && r1 == r2 && Math.abs(c2 - c1) == 2) {
             board[r2][c2] = piece;
@@ -332,14 +350,18 @@ public class BoardModel {
             epR = epC = -1;
             return;
         }
-        // en-passant capture detection
+        
+        // En-passant capture
         if ((piece == 'P' || piece == 'p') && board[r2][c2] == '.' && c1 != c2) {
             int capR = (piece == 'P') ? r2 + 1 : r2 - 1;
             if (capR >= 0 && capR < 8 && board[capR][c2] != '.') {
                 board[capR][c2] = '.';
             }
         }
+        
         board[r2][c2] = piece;
+        
+        // Promotion
         if (promo != 0) {
             char promoted = (Character.isUpperCase(piece)) ? Character.toUpperCase(promo) : Character.toLowerCase(promo);
             board[r2][c2] = promoted;
@@ -347,6 +369,7 @@ public class BoardModel {
             if (piece == 'P' && r2 == 0) board[r2][c2] = 'Q';
             if (piece == 'p' && r2 == 7) board[r2][c2] = 'q';
         }
+        
         if (Character.toUpperCase(piece) == 'P' && Math.abs(r2 - r1) == 2) {
             epR = (r1 + r2) / 2;
             epC = c2;
@@ -355,7 +378,6 @@ public class BoardModel {
         }
     }
 
-    /** Return defensive copy of board (if needed) */
     public char[][] getBoardCopy() {
         char[][] copy = new char[8][8];
         for (int r=0;r<8;r++) System.arraycopy(board[r],0,copy[r],0,8);

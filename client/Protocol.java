@@ -1,4 +1,11 @@
+/**
+ * Protocol
+ *
+ * Defines string constants for the text-based application protocol.
+ * Includes commands sent by the client and response headers sent by the server.
+ */
 public class Protocol {
+    // Client Commands
     public static final String CMD_HELLO = "HELLO";
     public static final String CMD_MV = "MV";
     public static final String CMD_RES = "RES";
