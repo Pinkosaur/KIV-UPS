@@ -219,10 +219,6 @@ public class ChessClient {
             NetworkClient nc = this.networkClient;
             if (nc != null) {
                 try { 
-                    if (!gamePanel.isGameEnded()) {
-                        nc.sendRaw(Protocol.CMD_RES);
-                        Thread.sleep(50); 
-                    }
                     nc.sendRaw(Protocol.CMD_EXT); 
                 } catch (Exception ignored) {}
                 try { nc.closeConnection(); } catch (Exception ignored) {}
@@ -237,6 +233,9 @@ public class ChessClient {
         }).start();
     }
 
+    /**
+     * Switches the UI view to the Lobby panel and initiates a room list refresh.
+     */
     private void switchToLobby() {
         if (resultOverlay.isEndOverlayShown()) {
             pendingLobbyReturn = true;
@@ -250,17 +249,26 @@ public class ChessClient {
         sendNetworkCommand(Protocol.CMD_LIST);
     }
 
+    /**
+     * Callback for the "Continue" button on the end-game overlay.
+     */
     private void onOverlayContinueClicked() {
         resultOverlay.hideOverlay();
         switchToLobby();
     }
 
+    /**
+     * Synchronizes the result overlay size with the current frame size.
+     */
     private void resizeOverlay() {
         Rectangle b = frame.getContentPane().getBounds();
         resultOverlay.setBounds(b);
         resultOverlay.setInnerBounds(0, 0, b.width, b.height);
     }
 
+    /**
+     * Disposes of the opponent-disconnected notification popup.
+     */
     private void closeDisconnectPopup() {
         if (disconnectPopup != null) {
             disconnectPopup.setVisible(false);
@@ -269,6 +277,9 @@ public class ChessClient {
         }
     }
 
+    /**
+     * Updates the UI timer label with the current remaining seconds.
+     */
     private void updateTimerDisplay() {
         int m = remainingSeconds / 60;
         int s = remainingSeconds % 60;
@@ -291,7 +302,7 @@ public class ChessClient {
         intentionalDisconnect = false;
         connectionEstablished = false; 
         handshakeCompleted = false; 
-        offlineQueue.clear(); // Clear old queue on fresh connect
+        offlineQueue.clear(); 
 
         this.networkClient = new NetworkClient(createNetworkListener());
         final NetworkClient clientRef = this.networkClient; 
@@ -310,10 +321,17 @@ public class ChessClient {
         t.start();
     }
 
+    /**
+     * Creates a new NetworkListener to handle socket-level events.
+     * Protocol-layer sequencing is omitted.
+     * * @return Implementation of the NetworkListener.
+     */
     private NetworkClient.NetworkListener createNetworkListener() {
         return new NetworkClient.NetworkListener() {
+            @Override
             public void onConnected() { connectionEstablished = true; }
             
+            @Override
             public void onDisconnected() {
                 SwingUtilities.invokeLater(() -> {
                     if (networkClient == null) return; 
@@ -334,14 +352,15 @@ public class ChessClient {
                 });
             }
             
-            public void onServerMessage(String line, int seq) {
+            @Override
+            public void onServerMessage(String line) {
                 NetworkClient nc = networkClient;
                 if (nc == null) return;
-                if (seq >= 0) nc.syncSequenceFromReception(seq);
                 System.out.println("<< " + line);
                 parseServerMessage(line);
             }
             
+            @Override
             public void onNetworkError(Exception ex) {
                 if (networkClient == null) return;
                 if (!intentionalDisconnect && !isReconnecting) SwingUtilities.invokeLater(() -> attemptReconnect());
@@ -376,7 +395,6 @@ public class ChessClient {
         SwingUtilities.invokeLater(() -> {
             statusLabel.setText("Connection lost. Reconnecting (" + reconnectAttempts + "/" + MAX_RECONNECT_ATTEMPTS + ")...");
             statusLabel.setForeground(Color.ORANGE);
-            /* Do NOT disable game controls. This allows the user to make a move (queueing it) while reconnecting. */
             if (lobbyPanel != null) lobbyPanel.setButtonsEnabled(false);
         });
         
@@ -392,7 +410,7 @@ public class ChessClient {
                 
                 newNc.connect(serverHost, serverPort, clientName, sessionID);
                 
-                // Flush the offline queue immediately after connection/handshake initiation
+                // Flush the offline queue immediately after connection
                 String queuedMsg;
                 while ((queuedMsg = offlineQueue.poll()) != null) {
                     newNc.sendRaw(queuedMsg);
@@ -403,7 +421,6 @@ public class ChessClient {
                     reconnectAttempts = 0; 
                     statusLabel.setText("Connected as " + clientName);
                     statusLabel.setForeground(Color.WHITE);
-                    // Ensure controls are enabled
                     if (gamePanel != null && !gamePanel.isGameEnded()) gamePanel.setControlsEnabled(true);
                     if (lobbyPanel != null) lobbyPanel.setButtonsEnabled(true);
                     
@@ -423,6 +440,9 @@ public class ChessClient {
         }).start();
     }
 
+    /**
+     * Resets the application state and returns to the initial Welcome screen.
+     */
     private void exitToWelcome() {
         lobbyTimer.stop();
         turnTimer.stop();
@@ -443,7 +463,8 @@ public class ChessClient {
 
     /**
      * Parses messages received from the server and updates the UI accordingly.
-     * @param msg The raw message string (sequence numbers stripped).
+     * Sequence numbers are no longer present in the protocol string.
+     * * @param msg The raw message string from the server.
      */
     private void parseServerMessage(String msg) {
         String u = msg.trim();
@@ -661,6 +682,11 @@ public class ChessClient {
         }
     }
 
+    /**
+     * Displays the victory or defeat overlay.
+     * * @param win True if the local player won, false otherwise.
+     * @param sub Subtitle description of the outcome.
+     */
     private void showEnd(boolean win, String sub) {
         SwingUtilities.invokeLater(() -> {
             closeDisconnectPopup();
@@ -668,6 +694,10 @@ public class ChessClient {
         });
     }
     
+    /**
+     * Displays a neutral result overlay (e.g., Stalemate).
+     * * @param sub Description of the outcome.
+     */
     private void showNeutral(String sub) {
         SwingUtilities.invokeLater(() -> {
             closeDisconnectPopup();
@@ -675,6 +705,10 @@ public class ChessClient {
         });
     }
 
+    /**
+     * Constructs the Welcome panel where users enter their name and server address.
+     * * @return The completed welcome JPanel.
+     */
     private JPanel createWelcomePanel() {
         JPanel welcome = new JPanel(new BorderLayout());
         
@@ -730,7 +764,6 @@ public class ChessClient {
             try { serverPort = Integer.parseInt(serverPortField.getText()); } catch(Exception ignore){}
             clientName = nameField.getText();
             
-            // Disable immediately
             connectBtn.setEnabled(false);
             statusLabel.setText("Connecting...");
             
@@ -742,6 +775,7 @@ public class ChessClient {
         welcome.add(wc, BorderLayout.SOUTH);
         
         welcome.addComponentListener(new ComponentAdapter() {
+            @Override
             public void componentResized(ComponentEvent e) {
                 welcomeBg.setBounds(0,0,welcome.getWidth(), welcome.getHeight());
                 welcomeLayer.setPreferredSize(welcome.getSize());

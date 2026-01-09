@@ -1,4 +1,3 @@
-/* match.h */
 /**
  * @file match.h
  * @brief Match structure and management interface.

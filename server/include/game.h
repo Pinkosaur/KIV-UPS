@@ -1,4 +1,3 @@
-/* game.h */
 /**
  * @file game.h
  * @brief Chess definitions and logic prototypes.

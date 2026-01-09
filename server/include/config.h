@@ -1,4 +1,3 @@
-/* config.h */
 /**
  * @file config.h
  * @brief Global configuration constants and limits.
@@ -22,7 +21,6 @@
 #define NAME_LEN 64             /**< Maximum length of a client name */
 #define ADDR_LEN 64             /**< Maximum length of a stringified IP address */
 #define ID_LEN 32               /**< Length of the unique session ID string */
-#define RECV_SUFFIX_LEN 16      /**< Buffer for parsing sequence number suffixes */
 
 /* Application Logic Constants */
 #define MAX_ERRORS 3            /**< Disconnect client after this many protocol violations */

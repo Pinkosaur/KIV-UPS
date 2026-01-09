@@ -1,4 +1,3 @@
-/* src/logging.c */
 /**
  * @file logging.c
  * @brief Thread-safe logging subsystem.

@@ -1,4 +1,3 @@
-/* game.c */
 /**
  * @file game.c
  * @brief Core chess logic implementation.

@@ -1,4 +1,3 @@
-/* logging.h */
 /**
  * @file logging.h
  * @brief Logging subsystem interface.
